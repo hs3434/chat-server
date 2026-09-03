@@ -1,0 +1,8 @@
+*.db
+*.db-wal
+*.db-shm
+bin/
+impl_py/
+impl_lua/
+__pycache__/
+.env
