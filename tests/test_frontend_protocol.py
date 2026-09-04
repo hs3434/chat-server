@@ -4,7 +4,7 @@ import asyncio, json
 import websockets
 
 async def main():
-    URL = "ws://127.0.0.1:8081"
+    URL = "ws://127.0.0.1:8081/ws"
     FAIL = []
 
     async def req(ws, obj, want_type, timeout=4):
