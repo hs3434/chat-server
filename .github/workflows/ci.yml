@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 轻量主 CI: 全部 22 套件 (协议 + 静态 + jsdom 交互), 无需真实浏览器
+# Playwright E2E 在独立的 e2e.yml (手动触发) — 不占用常规预算
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python deps (websockets)
+        run: pip install websockets
+
+      - name: Build Go binary
+        run: |
+          cd impl_go
+          go build -o ../bin/wxlike-go .
+
+      - name: Install frontend deps (eslint + jsdom)
+        run: npm ci --omit=dev
+        working-directory: tests/frontend
+
+      - name: Run all tests (22 suites)
+        run: bash tests/run_all.sh 8081 "$(pwd)" "$(which python3)"
+        timeout-minutes: 12
