@@ -1099,14 +1099,8 @@ func main() {
 	msgRate := flag.Float64("msg-rate", 5, "消息限流 refill 速率(条/秒); 0=关闭(测试用)")
 	regLimit := flag.Int("reg-limit", 3, "每 IP 10 分钟允许注册数; 0=关闭(测试用)")
 	admin := flag.String("admin", "", "管理员用户名 (只有该用户的 token 可导出 /export; 空=关闭导出)")
-	web := flag.String("web", "", "前端静态目录 (serve 到 /app/, 单二进制部署手机浏览器直接可用)")
+	web := flag.String("web", "", "前端静态目录 (serve 到 /, 单二进制部署手机浏览器直接可用)")
 	flag.Parse()
-
-	// 前端静态文件: /app/* -> web 目录 (手机浏览器直接访问 /app/)
-	if *web != "" {
-		http.Handle("/app/", http.StripPrefix("/app/", http.FileServer(http.Dir(*web))))
-		log.Printf("web static serving %s at /app/", *web)
-	}
 
 	base, _ := filepath.Abs(*dir)
 	schemaPath := filepath.Join(base, "schema.sql")
@@ -1118,6 +1112,15 @@ func main() {
 	}
 	srv := NewServer(store, *msgRate, *regLimit)
 
+	// 前端静态文件: / -> web 目录 (手机浏览器直接访问根路径)
+	if *web != "" {
+		go func() { log.Printf("web static serving %s at /", *web) }()
+		http.Handle("/", http.FileServer(http.Dir(*web)))
+		http.HandleFunc("/ws", srv.wsHandler) // WS 协议在 /ws
+	} else {
+		http.HandleFunc("/", srv.wsHandler) // 纯协议模式: WS 在根
+	}
+
 	// 数据导出端点 (管理员 token 鉴权): GET /export?token=xxx
 	if *admin != "" {
 		http.HandleFunc("/export", srv.exportHandler(*admin))
@@ -1126,7 +1129,6 @@ func main() {
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	log.Printf("wxlike-server(Go) listening %s", addr)
-	http.HandleFunc("/", srv.wsHandler)
 
 	srvHTTP := &http.Server{Addr: addr, Handler: nil}
 	go func() {
