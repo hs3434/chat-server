@@ -70,4 +70,22 @@ if (!script) { console.error('❌ 找不到 <script>'); fail = true; }
 else if (late.length) { console.error(`❌ script 之后还有 ${late.length} 个 id (同步执行会 null): ${late.slice(0,10)}`); fail = true; }
 
 if (fail) process.exit(1);
-console.log(`✅ DOM 一致性: ${htmlIds.size} 个 HTML id (jsdom 真解析), ${refs.size} 个 JS 引用, 全部对应, script 位置正确`);
+
+// 4. 静态资源引用存在性: <script src="/x.js"> / <link href="/x.css"> 指向的文件必须真实存在
+const staticRefs = [];
+const reSrc = /<(?:script|link)[^>]+(?:src|href)\s*=\s*['"](\/[^'"]+)['"]/g;
+let sm;
+while ((sm = reSrc.exec(html))) staticRefs.push(sm[1]);
+const webDir = path.join(ROOT, 'web');
+const missingFiles = staticRefs.filter(p => {
+  // 去掉前导 /, 相对 web 目录检查真实文件
+  const rel = p.replace(/^\//, '');
+  return !fs.existsSync(path.join(webDir, rel));
+});
+if (missingFiles.length) {
+  console.error(`❌ index.html 引用不存在的静态资源: ${missingFiles}`);
+  fail = true;
+}
+
+if (fail) process.exit(1);
+console.log(`✅ DOM 一致性: ${htmlIds.size} 个 HTML id (jsdom 真解析), ${refs.size} 个 JS 引用, ${staticRefs.length} 个静态资源, 全部对应, script 位置正确`);
