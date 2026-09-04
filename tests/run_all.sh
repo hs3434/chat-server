@@ -4,10 +4,11 @@
 # 保证: 每个测试前的干净状态 (清库 + 重启服务器)
 set -u
 PORT="${1:-8081}"
-PY=/workspace/wxlike-server/impl_py/.venv/bin/python
-BIN=/workspace/wxlike-server/bin/wxlike-go
-DIR=/workspace/wxlike-server
-TESTS=/workspace/wxlike-server/tests
+ROOT="${2:-$(cd "$(dirname "$0")/.." && pwd)}"   # 项目根 (默认: 脚本上级; 可传参覆盖)
+PY="${3:-$ROOT/impl_py/.venv/bin/python}"        # Python 解释器 (默认 venv)
+BIN="$ROOT/bin/wxlike-go"
+DIR="$ROOT"
+TESTS="$ROOT/tests"
 
 echo "==================== wxlike-server 测试 (Go, port $PORT) ===================="
 FAIL=0
