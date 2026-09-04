@@ -86,7 +86,7 @@ run_one "export"         "test_export.py"
 
 RATE_FLAG="--reg-limit 0"  # 前端协议测试
 run_one "frontend"       "test_frontend_protocol.py"
-run_one "frontend_dom"   "test_frontend_dom.py"
+run_one "frontend_lint"  "frontend/lint_ui.sh"
 run_one "frontend_ui"    "frontend/run_ui_test.sh"
 
 RATE_FLAG="--reg-limit 0"  # 群成员查询测试
