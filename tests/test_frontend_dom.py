@@ -57,6 +57,7 @@ def main():
             print(" -", f)
         sys.exit(1)
     print(f"✅ frontend-dom 检查通过: {len(html_ids)} 个 HTML id, {len(js_refs)} 个 JS 引用, 全部对应, script 位置正确")
+    print("ALL-PASS")
 
 if __name__ == "__main__":
     main()
