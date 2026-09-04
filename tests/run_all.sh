@@ -80,6 +80,7 @@ run_one "export"         "test_export.py"
 
 RATE_FLAG="--reg-limit 0"  # 前端协议测试
 run_one "frontend"       "test_frontend_protocol.py"
+run_one "frontend_dom"   "test_frontend_dom.py"
 
 RATE_FLAG="--reg-limit 0"  # 群成员查询测试
 run_one "groupmembers"   "test_group_members.py"
