@@ -1,0 +1,60 @@
+name: E2E (Playwright)
+
+on:
+  workflow_dispatch:        # 手动触发, 不跑常规 CI 预算
+  push:
+    tags: ['v*']            # 发版时自动跑一次完整浏览器 E2E
+
+# 重型 E2E: 真实 Chromium 全流程 (注册→登录→收发→群管理→设备管理)
+# 仅手动/发版触发 — 因浏览器二进制大 (~150MB 下载)、跑得慢
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python deps
+        run: pip install websockets
+
+      - name: Build Go binary
+        run: |
+          cd impl_go
+          go build -o ../bin/wxlike-go .
+
+      - name: Install frontend deps (eslint + jsdom + playwright)
+        run: |
+          npm ci
+          npm install @playwright/test
+        working-directory: tests/frontend
+
+      - name: Install Playwright Chromium (headless)
+        run: npx playwright install --with-deps chromium
+        working-directory: tests/frontend
+
+      - name: Start server
+        run: |
+          nohup ./bin/wxlike-go --port 8081 --dir "$(pwd)" --reg-limit 0 --web "$(pwd)/web" > /tmp/go_srv.log 2>&1 &
+          for i in $(seq 1 40); do (echo > /dev/tcp/127.0.0.1/8081) 2>/dev/null && break; sleep 0.2; done
+
+      - name: Run Playwright E2E
+        run: npx playwright test
+        working-directory: tests/frontend
+        timeout-minutes: 10
