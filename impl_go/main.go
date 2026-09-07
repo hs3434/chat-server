@@ -449,6 +449,33 @@ func (s *Server) addConn(user string, ws *websocket.Conn) {
 	}
 }
 
+// realClientIP 从 HTTP 请求解析客户端真实 IP。
+// nginx 反代/负载均衡时 RemoteAddr 是上一跳(nginx)的地址, 真实 IP 在转发头里。
+func realClientIP(r *http.Request) string {
+	remote := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(remote); err == nil {
+		remote = h
+	}
+	// X-Real-IP (nginx proxy_params 标准设置)
+	if xr := r.Header.Get("X-Real-IP"); xr != "" {
+		if h, _, err := net.SplitHostPort(xr); err == nil {
+			return h
+		}
+		return xr
+	}
+	// X-Forwarded-For: 逗号分隔, 第一个是最初客户端
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		first := strings.TrimSpace(strings.Split(xff, ",")[0])
+		if h, _, err := net.SplitHostPort(first); err == nil {
+			return h
+		}
+		if first != "" {
+			return first
+		}
+	}
+	return remote
+}
+
 // registerDevice 登录成功后为该连接生成会话元数据 (设备管理)
 func (s *Server) registerDevice(ws *websocket.Conn, remote string) *ConnMeta {
 	b := make([]byte, 8)
@@ -628,6 +655,10 @@ func (s *Server) wsHandler(w http.ResponseWriter, r *http.Request) {
 	var user string
 	defer ws.Close()
 
+	// 取客户端真实 IP: nginx 反代会把真实 IP 放 X-Real-IP / X-Forwarded-For 头,
+	// 不能直接用 RemoteAddr (那是上一跳 nginx/localhost 的地址)
+	clientIP := realClientIP(r)
+
 	// 心跳检测: 服务器每 54s 发 Ping, 客户端须回 Pong (浏览器自动回),
 	// ReadDeadline 60s: 若 60s 无任何帧(含 Pong) 则 ReadMessage 报错 -> 判死连接
 	ws.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -659,7 +690,7 @@ func (s *Server) wsHandler(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(raw, &msg) != nil {
 			continue
 		}
-		user = s.route(user, ws, msg, r.RemoteAddr)
+		user = s.route(user, ws, msg, clientIP)
 	}
 	if user != "" {
 		s.removeConn(user, ws)
