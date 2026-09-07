@@ -147,6 +147,7 @@ func (s *Store) UnreadCounts(user string) map[string]int {
 // ConversationRow 会话列表一行
 type ConversationRow struct {
 	Chat     string `json:"chat"`      // 单聊=对方 user; 群聊=group::<gid>
+	Name     string `json:"name"`      // 群聊=群名; 单聊=""
 	LastBody string `json:"last_body"` // 最后一条消息预览
 	LastTs   int64  `json:"last_ts"`   // 最后一条时间 (降序用)
 	LastFrom string `json:"last_from"` // 最后一条 sender
@@ -190,12 +191,31 @@ func (s *Store) Conversations(user string) []ConversationRow {
 	}
 	rows.Close()
 
+	// 补全「我加入但还没消息的群」(微信: 加入的群应在会话列表出现, 即使空白)
+	seenKeys := map[string]bool{}
+	for _, r := range out {
+		seenKeys[r.Chat] = true
+	}
+	grows, err := s.db.Query("SELECT gid, name FROM groups g WHERE gid IN (SELECT gid FROM group_members WHERE user=?)", user)
+	if err == nil {
+		for grows.Next() {
+			var gid, name string
+			grows.Scan(&gid, &name)
+			key := "group::" + gid
+			if !seenKeys[key] {
+				out = append(out, ConversationRow{Chat: key, Name: name, LastTs: 0})
+			}
+		}
+		grows.Close()
+	}
+
 	// 再统一查每会话未读数 (此时主查询已关)
 	for i := range out {
 		r := &out[i]
 		var n int
 		if len(r.Chat) >= 8 && r.Chat[:7] == "group::" {
 			s.db.QueryRow("SELECT COUNT(*) FROM msg_state st JOIN messages m ON m.id=st.msg_id WHERE st.user=? AND st.state IN (?,?) AND m.gid=?", user, StatePending, StateDelivered, "group:"+r.Chat[7:]).Scan(&n)
+			s.db.QueryRow("SELECT name FROM groups WHERE gid=?", r.Chat[7:]).Scan(&r.Name)
 		} else {
 			s.db.QueryRow("SELECT COUNT(*) FROM msg_state st JOIN messages m ON m.id=st.msg_id WHERE st.user=? AND st.state IN (?,?) AND ((m.sender=? AND m.recipient=?) OR (m.sender=? AND m.recipient=?))", user, StatePending, StateDelivered, r.Chat, user, user, r.Chat).Scan(&n)
 		}
