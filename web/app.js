@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const State = {
   user: null,
   token: null,
+  chatName: null,       // 当前打开的群名 (来自 conversations.name)
   ws: null,
   convs: [],          // 会话列表 [{chat,last_body,last_ts,last_from,unread}]
   online: {},         // user -> bool (presence)
@@ -112,6 +113,9 @@ function handleServer(m) {
     case 'register_ok': resolveReq(m.seq, m); break;
     case 'group_ok': resolveReq(m.seq, m); break;
     case 'error': resolveReq(m.seq, m); break;
+    case 'conversations_refresh': // 服务器通知会话列表有变化 (如被拉进群)
+      refreshConvs();
+      break;
     default: console.log('unhandled:', m);
   }
 }
@@ -155,7 +159,7 @@ function renderConvs() {
   if (!State.convs.length) { box.innerHTML = '<div class="empty">暂无会话, 去消息页发一条吧</div>'; return; }
   const sorted = [...State.convs].sort((a, b) => b.last_ts - a.last_ts);
   box.innerHTML = sorted.map((c) => {
-    const name = isGroup(c.chat) ? c.chat.slice(7) : c.chat;
+    const name = isGroup(c.chat) ? (c.name || c.chat.slice(7)) : c.chat;
     const av = name[0] ? name[0].toUpperCase() : '?';
     const onlineTag = (!isGroup(c.chat) && State.online[c.chat]) ? '🟢' : '';
     const unread = c.unread > 0 ? `<span class="badge">${c.unread}</span>` : '';
@@ -183,14 +187,20 @@ async function openChat(chat) {
   $('chathead').classList.remove('hidden');
   $('inputbar').classList.remove('hidden');
   $('grpInfo').classList.toggle('hidden', !isGroup(chat));
+  State.chatName = null;
+  if (isGroup(chat)) {
+    const c = State.convs.find((x) => x.chat === chat);
+    if (c && c.name) State.chatName = c.name;
+  }
   $('msgs').innerHTML = '';
   updateChatHead();
   renderMsgs();
   // 拉历史 (最近 50 条)
   const r = await req({ type: 'history', chat, limit: 50 }, 'history');
-  if (r && r.items) {
+  if (r && (r.items || r.rows)) {
     const arr = State.msgs[chat];
-    r.items.forEach((m) => { if (!arr.some((x) => x.id === m.id)) arr.push({ id: m.id, from: m.from, body: m.body, ts: m.ts, state: m.state }); });
+    const list = r.items || r.rows; // 服务器 history 响应字段是 rows (conversations/unread/recent 用 items)
+    list.forEach((m) => { if (!arr.some((x) => x.id === m.id)) arr.push({ id: m.id, from: m.from, body: m.body, ts: m.ts, state: m.state }); });
     arr.sort((a, b) => a.id - b.id);
     State.msgs[chat] = arr;
     renderMsgs();
@@ -201,7 +211,7 @@ async function openChat(chat) {
 
 function updateChatHead() {
   if (!State.view) return;
-  const name = isGroup(State.view) ? State.view.slice(7) : State.view;
+  const name = isGroup(State.view) ? (State.chatName || State.view.slice(7)) : State.view;
   $('chatName').textContent = name;
   const st = isGroup(State.view) ? '群聊' : (State.online[State.view] ? '在线' : '离线');
   $('chatStatus').textContent = st;
@@ -297,6 +307,10 @@ async function doLogin(regToo) {
 }
 
 function completeLogin() {
+  try {
+    localStorage.setItem('wxlike_token', State.token || '');
+    localStorage.setItem('wxlike_user', State.user || '');
+  } catch (e) { /* 隐私模式等 localStorage 不可用: 仅内存登录态 */ }
   $('auth').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('meUser').textContent = State.user;
@@ -304,6 +318,7 @@ function completeLogin() {
 }
 
 function logout() {
+  try { localStorage.removeItem('wxlike_token'); localStorage.removeItem('wxlike_user'); } catch (e) {}
   if (State.ws) State.ws.close();
   State.user = null; State.token = null; State.convs = []; State.online = {}; State.view = null;
   State.msgs = {}; State.seen = new Set();
@@ -361,8 +376,13 @@ async function createGroup() {
   const gid = 'g' + Date.now().toString(36);
   const r = await req({ type: 'create_group', gid, name: name.trim() }, 'group_ok');
   if (r && r.type === 'group_ok') {
+    // 本地先插入新群会话 (含 name), 避免 openChat 时 convs 还没刷新拿不到群名
+    const key = 'group::' + gid;
+    if (!State.convs.some((x) => x.chat === key)) {
+      State.convs.unshift({ chat: key, name: name.trim(), last_body: '', last_ts: Date.now(), last_from: '', unread: 0 });
+    }
     refreshConvs();
-    openChat('group::' + gid);
+    openChat(key);
   } else {
     alert('建群失败: ' + (r && r.code || '未知'));
   }
@@ -473,4 +493,9 @@ $('chatback').onclick = () => { $('chatbox').classList.remove('open'); State.vie
 $('sendbtn').onclick = sendMsg;
 $('inp').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
 
+// 载入时恢复登录态 (token 持久化在 localStorage): 有 token 则 connect 后自动 tokenLogin
+try {
+  const t = localStorage.getItem('wxlike_token');
+  if (t) State.token = t;
+} catch (e) {}
 connect();
