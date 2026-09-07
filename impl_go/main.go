@@ -591,9 +591,12 @@ func (s *Server) notifyPresence(user string, online bool) {
 
 // deliver 实时投递一条消息给在线接收方 (并发投给它的所有连接)
 // 消息本体已存, msgID 是会话内唯一 id
-func (s *Server) deliver(recipient string, msgID int64, from, body string, ts int64) {
+func (s *Server) deliver(recipient string, msgID int64, from, body string, ts int64, gid ...string) {
 	conns := s.onlineConns(recipient)
 	msg := map[string]interface{}{"type": "msg", "id": msgID, "from": from, "body": body, "ts": ts}
+	if len(gid) > 0 && gid[0] != "" {
+		msg["gid"] = gid[0] // 群消息: 前端靠 gid 识别群并渲染到群会话
+	}
 	for _, c := range conns {
 		s.writeJSON(c, msg)
 	}
@@ -666,12 +669,27 @@ func (s *Server) wsHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface{}, remote string) string {
 	act, _ := msg["type"].(string)
 
+	// 请求序号回显: 前端 req() 靠 seq 匹配 pending, 响应必须带请求的 seq
+	seq, _ := msg["seq"].(float64)
+	reply := func(obj map[string]interface{}) {
+		if seq != 0 {
+			obj["seq"] = seq
+		}
+		s.send(ws, obj)
+	}
+	errReply := func(code string) {
+		reply(map[string]interface{}{"type": "error", "code": code})
+	}
+	loginOK := func(u, tok string) {
+		reply(map[string]interface{}{"type": "login_ok", "user": u, "token": tok})
+	}
+
 	if act == "login" {
 		u, _ := msg["user"].(string)
 		p, _ := msg["pass"].(string)
 		// 登录失败锁: 连续 5 次失败锁 5 分钟 (防暴力破解)
 		if locked, wait := s.loginLocked(u); locked {
-			s.send(ws, map[string]interface{}{"type": "error", "code": "login_locked", "retry_after": wait})
+			reply(map[string]interface{}{"type": "error", "code": "login_locked", "retry_after": wait})
 			return ""
 		}
 		if s.store.Login(u, p) {
@@ -688,12 +706,12 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 				}
 				s.writeJSON(ws, payload)
 			}
-			s.sendLoginOK(ws, u, s.genToken(u))
+			loginOK(u, s.genToken(u))
 			return u
 		}
 		s.loginLockout.RecordFail(u)
 		s.store.AuditLogin(u, "fail", remote)
-		s.sendError(ws, "auth")
+		errReply("auth")
 		return ""
 	}
 
@@ -704,7 +722,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		u, ok := s.tokens[tok]
 		s.mu.Unlock()
 		if !ok {
-			s.sendError(ws, "unauthorized")
+			errReply("unauthorized")
 			return ""
 		}
 		s.addConn(u, ws)
@@ -718,22 +736,22 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			}
 			s.writeJSON(ws, payload)
 		}
-		s.sendLoginOK(ws, u, tok) // 原 token 继续有效
+		loginOK(u, tok) // 原 token 继续有效
 		return u
 	}
 
 	if act == "register" {
 		// 注册 IP 限流: 每 IP 10 分钟限 3 次 (防机器人灌库)
 		if !s.regAllowed(remote) {
-			s.sendError(ws, "reg_limited")
+			errReply("reg_limited")
 			return user
 		}
 		u, _ := msg["user"].(string)
 		p, _ := msg["pass"].(string)
 		if s.store.CreateUser(u, p) {
-			s.send(ws, map[string]interface{}{"type": "register_ok"})
+			reply(map[string]interface{}{"type": "register_ok"})
 		} else {
-			s.sendError(ws, "exists")
+			errReply("exists")
 		}
 		return user
 	}
@@ -744,7 +762,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			if tu := s.userByToken(tok); tu != "" {
 				user = tu // token 有效, 以 token 绑定的用户身份执行
 			} else {
-				s.sendError(ws, "unauthorized")
+				errReply("unauthorized")
 				return ""
 			}
 		} else {
@@ -765,7 +783,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		if devs == nil {
 			devs = []map[string]interface{}{}
 		}
-		s.send(ws, map[string]interface{}{"type": "sessions", "devices": devs})
+		reply(map[string]interface{}{"type": "sessions", "devices": devs})
 		return user
 	}
 
@@ -773,10 +791,10 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		// 主动断开我的指定设备: {sid}
 		sid, _ := msg["sid"].(string)
 		if sid == "" || !s.kickDevice(user, sid) {
-			s.sendError(ws, "not_found")
+			errReply("not_found")
 			return user
 		}
-		s.send(ws, map[string]interface{}{"type": "kick_ok"})
+		reply(map[string]interface{}{"type": "kick_ok"})
 		return user
 	}
 
@@ -813,18 +831,18 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		gid, _ := msg["gid"].(string)
 		gid = strings.TrimPrefix(strings.TrimPrefix(gid, "group::"), "group:")
 		if !s.store.GroupExists(gid) {
-			s.sendError(ws, "group_not_found")
+			errReply("group_not_found")
 			return user
 		}
 		if !s.store.IsGroupMember(gid, user) {
-			s.sendError(ws, "not_member")
+			errReply("not_member")
 			return user
 		}
 		row := s.store.db.QueryRow("SELECT name, owner FROM groups WHERE gid=?", gid)
 		var name, owner string
 		row.Scan(&name, &owner)
 		members := s.store.GroupMembers(gid)
-		s.send(ws, map[string]interface{}{
+		reply(map[string]interface{}{
 			"type": "group_members", "gid": "group::" + gid,
 			"name": name, "owner": owner, "members": members,
 		})
@@ -836,21 +854,21 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		gid, _ := msg["gid"].(string)
 		to, _ := msg["user"].(string)
 		if !s.store.GroupExists(gid) {
-			s.sendError(ws, "group_not_found")
+			errReply("group_not_found")
 			return user
 		}
 		if !s.store.IsGroupOwner(gid, user) {
-			s.sendError(ws, "not_owner")
+			errReply("not_owner")
 			return user
 		}
 		if !s.store.IsGroupMember(gid, to) {
-			s.sendError(ws, "not_member")
+			errReply("not_member")
 			return user
 		}
 		if s.store.TransferOwner(gid, user, to) {
-			s.send(ws, map[string]interface{}{"type": "group_ok"})
+			reply(map[string]interface{}{"type": "group_ok"})
 		} else {
-			s.send(ws, map[string]interface{}{"type": "error"})
+			reply(map[string]interface{}{"type": "error"})
 		}
 		return user
 	}
@@ -862,9 +880,9 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			name = gid
 		}
 		if s.store.CreateGroup(gid, name, user) {
-			s.send(ws, map[string]interface{}{"type": "group_ok"})
+			reply(map[string]interface{}{"type": "group_ok"})
 		} else {
-			s.sendError(ws, "exists")
+			errReply("exists")
 		}
 		return user
 	}
@@ -873,9 +891,13 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		gid, _ := msg["gid"].(string)
 		u, _ := msg["user"].(string)
 		if s.store.AddMember(gid, u) {
-			s.send(ws, map[string]interface{}{"type": "group_ok"})
+			reply(map[string]interface{}{"type": "group_ok"})
+			// 被拉入者在线时立即刷新会话列表 (微信语义: 进群立刻看到群)
+			for _, c := range s.onlineConns(u) {
+				s.writeJSON(c, map[string]interface{}{"type": "conversations_refresh"})
+			}
 		} else {
-			s.send(ws, map[string]interface{}{"type": "error"})
+			reply(map[string]interface{}{"type": "error"})
 		}
 		return user
 	}
@@ -885,17 +907,17 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		gid, _ := msg["gid"].(string)
 		u, _ := msg["user"].(string)
 		if !s.store.GroupExists(gid) {
-			s.sendError(ws, "group_not_found")
+			errReply("group_not_found")
 			return user
 		}
 		if !s.store.IsGroupOwner(gid, user) {
-			s.sendError(ws, "not_owner")
+			errReply("not_owner")
 			return user
 		}
 		if s.store.RemoveMember(gid, u) {
-			s.send(ws, map[string]interface{}{"type": "group_ok"})
+			reply(map[string]interface{}{"type": "group_ok"})
 		} else {
-			s.send(ws, map[string]interface{}{"type": "error"})
+			reply(map[string]interface{}{"type": "error"})
 		}
 		return user
 	}
@@ -904,13 +926,13 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		// 自己退群 (群主退群 = 解散? 微信: 群主不能退群, 只能解散或转让; 这里允许退)
 		gid, _ := msg["gid"].(string)
 		if !s.store.GroupExists(gid) {
-			s.sendError(ws, "group_not_found")
+			errReply("group_not_found")
 			return user
 		}
 		if s.store.LeaveGroup(gid, user) {
-			s.send(ws, map[string]interface{}{"type": "group_ok"})
+			reply(map[string]interface{}{"type": "group_ok"})
 		} else {
-			s.send(ws, map[string]interface{}{"type": "error"})
+			reply(map[string]interface{}{"type": "error"})
 		}
 		return user
 	}
@@ -919,17 +941,17 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		// 群主解散群
 		gid, _ := msg["gid"].(string)
 		if !s.store.GroupExists(gid) {
-			s.sendError(ws, "group_not_found")
+			errReply("group_not_found")
 			return user
 		}
 		if !s.store.IsGroupOwner(gid, user) {
-			s.sendError(ws, "not_owner")
+			errReply("not_owner")
 			return user
 		}
 		if s.store.DissolveGroup(gid) {
-			s.send(ws, map[string]interface{}{"type": "group_ok"})
+			reply(map[string]interface{}{"type": "group_ok"})
 		} else {
-			s.send(ws, map[string]interface{}{"type": "error"})
+			reply(map[string]interface{}{"type": "error"})
 		}
 		return user
 	}
@@ -937,14 +959,14 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 	if act == "msg" {
 		// 消息令牌桶: 突发 10, 5条/秒; 超限拒绝 (防脚本刷屏拖垮 1核 VPS)
 		if ok, wait := s.msgAllowed(user); !ok {
-			s.send(ws, map[string]interface{}{"type": "error", "code": "rate_limited", "retry_after": wait})
+			reply(map[string]interface{}{"type": "error", "code": "rate_limited", "retry_after": wait})
 			return user
 		}
 		to, _ := msg["to"].(string)
 		body, _ := msg["body"].(string)
 		// 消息长度限制: 单条 <= 10KB (微信 ~4KB, 给富余; 防超长消息拖垮内存)
 		if len(body) > 10*1024 {
-			s.send(ws, map[string]interface{}{"type": "error", "code": "msg_too_large"})
+			reply(map[string]interface{}{"type": "error", "code": "msg_too_large"})
 			return user
 		}
 		ts := time.Now().UnixMilli()
@@ -952,33 +974,38 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 
 		if isGroup {
 			// 群聊: 必须群存在 + 发送者是成员 (微信要求)
+			// 归一化 gid: 前端传 group::<gid> 或 group:<gid> → 无前缀 <gid> (groups/group_members 表格式)
+			to = strings.TrimPrefix(strings.TrimPrefix(to, "group::"), "group:")
 			if !s.store.GroupExists(to) {
-				s.sendError(ws, "group_not_found")
+				errReply("group_not_found")
 				return user
 			}
 			if !s.store.IsGroupMember(to, user) {
-				s.sendError(ws, "not_member")
+				errReply("not_member")
 				return user
 			}
-			// 消息本体一份, 每个成员入队
-			gid := "group:" + to
-			msgID, err := s.store.SaveGroup(gid, user, body, ts)
+			// 消息本体一份 (messages.gid 带 group: 前缀, 与 ack/conversations 剥离逻辑一致)
+			msgID, err := s.store.SaveGroup("group:"+to, user, body, ts)
 			if err != nil {
 				return user
 			}
 			for _, member := range s.store.GroupMembers(to) {
 				if member == user {
+					// sender 自身: 在线时直接回显(服务器权威), 不建 msg_state (避免群已读统计把发送者自己算进去)
+					if s.isOnline(member) {
+						s.deliver(member, msgID, user, body, ts, "group:"+to)
+					}
 					continue
 				}
-				s.store.Enqueue(member, msgID) // pending
+				s.store.Enqueue(member, msgID) // pending  (非 sender 成员入队)
 				if s.isOnline(member) {
-					s.deliver(member, msgID, user, body, ts)
+					s.deliver(member, msgID, user, body, ts, "group:"+to)
 				}
 			}
 		} else {
 			// 单聊: 对方必须存在
 			if !s.store.UserExists(to) {
-				s.sendError(ws, "no_such_user")
+				errReply("no_such_user")
 				return user
 			}
 			// 一条本体(recipient=to), 收方入队
@@ -1003,7 +1030,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 				online[s_] = s.isOnline(s_)
 			}
 		}
-		s.send(ws, map[string]interface{}{"type": "presence", "online": online})
+		reply(map[string]interface{}{"type": "presence", "online": online})
 		return user
 	}
 
@@ -1013,7 +1040,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		if rows == nil {
 			rows = []ConversationRow{}
 		}
-		s.send(ws, map[string]interface{}{"type": "conversations", "items": rows})
+		reply(map[string]interface{}{"type": "conversations", "items": rows})
 		return user
 	}
 
@@ -1024,7 +1051,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		for k, v := range counts {
 			items = append(items, map[string]interface{}{"chat": k, "count": v})
 		}
-		s.send(ws, map[string]interface{}{"type": "unread", "items": items})
+		reply(map[string]interface{}{"type": "unread", "items": items})
 		return user
 	}
 
@@ -1032,7 +1059,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		// 已读回执: 某会话最近消息附带 state (read=已读)
 		chatKey, _ := msg["chat"].(string)
 		rows := s.store.Receipts(user, chatKey)
-		s.send(ws, map[string]interface{}{"type": "receipts", "rows": rows})
+		reply(map[string]interface{}{"type": "receipts", "rows": rows})
 		return user
 	}
 
@@ -1049,7 +1076,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		if rows == nil {
 			rows = []MsgRow{}
 		}
-		s.send(ws, map[string]interface{}{"type": "recent", "items": rows})
+		reply(map[string]interface{}{"type": "recent", "items": rows})
 		return user
 	}
 
@@ -1059,7 +1086,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		if len(chatKey) >= 7 && chatKey[:7] == "group::" {
 			gid := chatKey[7:]
 			if !s.store.GroupExists(gid) || !s.store.IsGroupMember(gid, user) {
-				s.sendError(ws, "not_member")
+				errReply("not_member")
 				return user
 			}
 		}
@@ -1073,7 +1100,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			beforeID = int64(b)
 		}
 		rows := s.store.History(user, chatKey, limit, beforeID)
-		s.send(ws, map[string]interface{}{"type": "history", "rows": rows})
+		reply(map[string]interface{}{"type": "history", "rows": rows})
 		return user
 	}
 
