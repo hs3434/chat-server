@@ -6,6 +6,12 @@ const $ = (id) => document.getElementById(id);
 const State = {
   user: null,
   token: null,
+  nick: null,            // 自己的昵称 (空=回落 user)
+  avatar: null,          // 自己的头像 /uploads/file (空=首字母占位)
+  sig: null,             // 自己签名
+  profiles: {},          // username -> {nickname,signature,avatar} (展示用缓存)
+  profileQ: {},          // username -> true (get_profile in-flight, 防重复)
+  myLastProfile: null,   // 上次拿到的自己的完整资料对象
   chatName: null,       // 当前打开的群名 (来自 conversations.name)
   ws: null,
   convs: [],          // 会话列表 [{chat,last_body,last_ts,last_from,unread}]
@@ -44,6 +50,7 @@ function connect() {
   };
   ws.onerror = () => ws.close();
   State.ws = ws;
+
 }
 
 function send(obj) {
@@ -67,6 +74,11 @@ function handleServer(m) {
     case 'login_ok': {
       State.user = m.user;
       State.token = m.token;
+      // 登录带上自己 profile (服务器 set 过才有; 空回落 username)
+      State.nick = m.nickname || '';
+      State.avatar = m.avatar || '';
+      State.sig = m.signature || '';
+      if (State.user) cacheProfile(State.user, { nickname: State.nick, signature: State.sig, avatar: State.avatar });
       completeLogin();
       break;
     }
@@ -116,6 +128,35 @@ function handleServer(m) {
     case 'conversations_refresh': // 服务器通知会话列表有变化 (如被拉进群)
       refreshConvs();
       break;
+    case 'profile_evt': // 他人改了资料 (推给有会话的人)
+      if (m.user) {
+        cacheProfile(m.user, { nickname: m.nickname, avatar: m.avatar, signature: m.signature });
+        if (m.user === State.user) { State.nick = m.nickname || ''; State.sig = m.signature || ''; State.avatar = m.avatar || ''; updateMeBar(); }
+        refreshConvs();
+        renderMsgs(); // 可能正显示该成员发的旧消息, 一并更新
+        updateChatHead();
+      }
+      break;
+    case 'profile_ok': case 'profile':
+      if (m.profile) {
+        const p = m.profile;
+        // 完整缓存 (含签名)
+        cacheProfile(p.username, p);
+        // 若是自己的资料改动 (set_profile 回显 / 其它端改我的), 同步本机并刷新"我"
+        if (p.username === State.user) {
+          State.nick = p.nickname || '';
+          State.sig = p.signature || '';
+          State.avatar = p.avatar || '';
+          updateMeBar();
+        }
+        // 注意: 服务器 type='profile' 应答也可能来自后台预热 get_profile (warmUsers/hitProfile),
+        //       因此这里不自动弹资料卡; 只在用户主动点击(showPeerCard)时渲染。见 showPeerCard。
+      }
+      resolveReq(m.seq, m); // set_profile/get_profile 的响应走 req 匹配
+      break;
+    case 'profiles': // 批量 (群成员/会话) 资料
+      if (Array.isArray(m.items)) m.items.forEach((p) => cacheProfile(p.username, p));
+      break;
     default: console.log('unhandled:', m);
   }
 }
@@ -152,6 +193,7 @@ async function refreshConvs() {
     const pr = await req({ type: 'presence', users }, 'presence');
     if (pr) { State.online = { ...State.online, ...pr.online }; renderConvs(); refreshConversationStatus(); }
   }
+  warmUsers(users); // 预热单聊对方资料 → 昵称/头像展示
 }
 
 function renderConvs() {
@@ -159,15 +201,20 @@ function renderConvs() {
   if (!State.convs.length) { box.innerHTML = '<div class="empty">暂无会话, 去消息页发一条吧</div>'; return; }
   const sorted = [...State.convs].sort((a, b) => b.last_ts - a.last_ts);
   box.innerHTML = sorted.map((c) => {
-    const name = isGroup(c.chat) ? (c.name || c.chat.slice(7)) : c.chat;
-    const av = name[0] ? name[0].toUpperCase() : '?';
-    const onlineTag = (!isGroup(c.chat) && State.online[c.chat]) ? '🟢' : '';
+    const isPub = isGroup(c.chat);
+    const pf = isPub ? null : (State.profiles[c.chat] || null); // 单聊对方 (展示用昵称+头像)
+    const name = isPub ? (c.name || c.chat.slice(7)) : (pf && pf.nickname ? pf.nickname : c.chat);
+    const avImg = pf && avatarUrl(pf.avatar);   // 图
+    const av = avImg
+      ? `<img src="${esc(avImg)}" alt="" onerror="this.remove()">`
+      : `<span class="av-letter">${esc(firstGlyph(name))}</span>`;
+    const onlineTag = (!isPub && State.online[c.chat]) ? '🟢' : '';
     const unread = c.unread > 0 ? `<span class="badge">${c.unread}</span>` : '';
-    return `<div class="conv" data-chat="${c.chat}">
+    return `<div class="conv" data-chat="${esc(c.chat)}">
       <div class="av">${av}</div>
       <div class="cmain">
         <div class="cname"><span>${esc(name)} ${onlineTag}</span><span class="t">${fmtTs(c.last_ts)}</span></div>
-        <div class="clast">${esc(c.last_from + ': ' + c.last_body)}</div>
+        <div class="clast">${esc((c.last_from ? nickOf(c.last_from) + ': ' : '') + (c.last_body || ''))}</div>
       </div>${unread}
     </div>`;
   }).join('');
@@ -206,15 +253,27 @@ async function openChat(chat) {
     renderMsgs();
     // 打开会话: 未读清零 + ack 所有我的未读
     ackAllUnread(chat);
+    // 预热会话里出现的发送者资料 (群聊昵称/头像)
+    const senders = {};
+    arr.forEach((mm) => { if (mm.from && mm.from !== State.user) senders[mm.from] = 1; });
+    if (!isGroup(chat) && chat !== State.user) senders[chat] = 1;
+    warmUsers(Object.keys(senders));
   }
 }
 
 function updateChatHead() {
   if (!State.view) return;
-  const name = isGroup(State.view) ? (State.chatName || State.view.slice(7)) : State.view;
+  const isPub = isGroup(State.view);
+  let name, avRaw;
+  if (isPub) { name = State.chatName || State.view.slice(7); avRaw = ''; }
+  else { const pf = profileOf(State.view) || {}; name = pf.nickname || State.view; avRaw = pf.avatar; }
   $('chatName').textContent = name;
-  const st = isGroup(State.view) ? '群聊' : (State.online[State.view] ? '在线' : '离线');
+  const st = isPub ? '群聊' : (State.online[State.view] ? '在线' : '离线');
   $('chatStatus').textContent = st;
+  // 头部的群聊/名片入口
+  $('grpInfo').classList.toggle('hidden', !isPub);
+  $('viewProfile').classList.toggle('hidden', isPub);
+  setPfp($('chatHeadAvatar'), avRaw, name);
 }
 
 function renderMsgs() {
@@ -223,7 +282,7 @@ function renderMsgs() {
   if (!arr.length) { box.innerHTML = '<div class="empty">没有消息</div>'; return; }
   box.innerHTML = arr.map((m) => {
     const mine = m.from === State.user;
-    const who = isGroup(State.view) && !mine ? `<div class="who">${esc(m.from)}</div>` : '';
+    const who = isGroup(State.view) && !mine ? `<div class="who">${esc(nickOf(m.from))}</div>` : '';
     const recp = (!mine && m.state === 'read') ? '<span class="recp">已读</span>' : '';
     return `<div class="msg ${mine ? 'mine' : 'theirs'}" data-id="${m.id}">
       ${who}${esc(m.body)}<div class="meta">${fmtTs(m.ts)}${mine ? '' : recp}</div>
@@ -314,6 +373,7 @@ function completeLogin() {
   $('auth').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('meUser').textContent = State.user;
+  updateMeBar();   // 头像 + 昵称 (含回落用户名)
   refreshConvs();
 }
 
@@ -475,6 +535,150 @@ function showToast(msg) {
   t._timer = setTimeout(() => { t.remove(); }, 3000);
 }
 
+// ---------- 资料/头像/昵称 (改造新增) ----------
+// 取某用户展示昵称
+function nickOf(u) {
+  if (u === State.user) return State.nick || u;
+  const p = State.profiles[u];
+  return (p && p.nickname) ? p.nickname : u;
+}
+// 头像路径归一: 库中 avatar 可能是裸文件名 "a_x.png"(上传落库) 或
+// "/uploads/a_x.png"(set_profile/各应答回传); 统一成 <img> 可用的本站路径
+function avatarUrl(raw) {
+  if (!raw) return '';
+  const a = String(raw).trim();
+  if (!a) return '';
+  if (/^https?:\/\//i.test(a)) return a;   // (预留外链)
+  if (a.charAt(0) === '/') return a;        // 已 /uploads/..
+  return '/uploads/' + a;                    // 裸文件名 -> 补前缀
+}
+function firstGlyph(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (!t) return '?';
+  return (Array.from(t)[0] || '?').toUpperCase();
+}
+// 在 el(如 .avatar div) 里画头像: 有图 -> img(覆盖 textContent 留下安全), 无图 -> 绿调首字
+function setPfp(el, raw, glyph) {
+  if (!el) return;
+  const url = avatarUrl(raw);
+  if (url) { el.innerHTML = '<img src="' + esc(url) + '" alt="" onerror="this.remove()">'; return; }
+  el.style.background = 'linear-gradient(135deg,#4aa9c9,#07c160)';
+  el.style.color = '#fff';
+  el.textContent = firstGlyph(glyph || '?');
+}
+function cacheProfile(u, p) {
+  if (!u) return;
+  State.profiles[u] = {
+    nickname: (p && p.nickname) || '',
+    signature: (p && p.signature) || '',
+    avatar: (p && p.avatar) || '',
+  };
+}
+function profileOf(u) { return State.profiles[u] || null; }
+// 取资料 (缓存命中直接返回; 否则去并发 get_profile, 结果自动进缓存并刷新相关视图)
+function hitProfile(u) {
+  if (!u) return Promise.resolve(null);
+  if (State.profiles[u]) return Promise.resolve(State.profiles[u]);
+  if (State.profileQ[u]) return Promise.resolve(null);
+  State.profileQ[u] = true;
+  return req({ type: 'get_profile', to_user: u }, 'profile', 5000)
+    .then((m) => {
+      if (m && m.type === 'profile' && m.profile) cacheProfile(m.profile.username || u, m.profile);
+      return profileOf(u);
+    })
+    .catch(() => null)
+    .finally(() => { delete State.profileQ[u]; });
+}
+// 预热若干个展示用用户名资料 (群/会话对方), 全部回来后轻刷视图
+function warmUsers(list) {
+  (list || []).forEach((u) => {
+    if (!u || u === State.user) return;
+    if (State.profiles[u] || State.profileQ[u]) return;
+    hitProfile(u).then(() => { if (State.view && !isGroup(State.view) && State.view === u) { updateChatHead(); renderMsgs(); } else { renderConvs(); } });
+  });
+}
+
+// ---- 我的资料 (顶栏 "我" 点击弹出的编辑面板) ----
+function openMyProfile() {
+  hideModal(); hideDevices(); $('peerModal').classList.add('hidden');
+  const nm = $('myName'); if (nm) nm.value = State.nick || '';
+  const sg = $('mySig'); if (sg) sg.value = State.sig || '';
+  const tip = $('myTip'); if (tip) tip.textContent = '';
+  setPfp($('myAvatar'), State.avatar, nickOf(State.user));
+  $('myModal').classList.remove('hidden');
+}
+function closeMyProfile() {
+  $('myModal').classList.add('hidden');
+  const fi = $('myAvFile'); if (fi) { try { fi.value = ''; } catch (e) {} }
+}
+// 上传头像: POST /upload?token=<token>, multipart file
+async function onAvatarChosen(file) {
+  const tip = $('myTip');
+  if (!file) return;
+  if (tip) { tip.style.color = '#e64340'; tip.textContent = '上传中…'; }
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const resp = await fetch('/upload?token=' + encodeURIComponent(State.token || ''), { method: 'POST', body: fd });
+    let j = {};
+    try { j = await resp.json(); } catch (e) {}
+    if (!resp.ok || !j.url) { if (tip) tip.textContent = '上传失败: ' + (resp.status + ''); return; }
+    // 服务器已把新头像写进账号; 前端同步自己的头像并刷新展示
+    State.avatar = avatarUrl(j.url);
+    if (State.user) cacheProfile(State.user, { nickname: State.nick, avatar: State.avatar, signature: State.sig });
+    setPfp($('myAvatar'), State.avatar, nickOf(State.user));
+    updateMeBar();
+    renderConvs(); renderMsgs();
+    if (tip) { tip.style.color = '#07c160'; tip.textContent = '头像已上传 ✓ 点"保存"以一并更新昵称/签名'; }
+  } catch (e) {
+    if (tip) { tip.style.color = '#e64340'; tip.textContent = '上传失败 (网络/格式需 jpg/png/gif)'; }
+  }
+}
+// 保存昵称/签名/头像 (set_profile)
+async function saveMyProfile() {
+  const tip = $('myTip');
+  const nickname = ($('myName').value || '').trim();
+  const signature = ($('mySig').value || '').trim();
+  if (tip) tip.textContent = '保存中…';
+  const r = await req({ type: 'set_profile', nickname, signature, avatar: State.avatar || '' }, 'profile_ok', 5000);
+  if (r && r.type === 'profile_ok') {
+    if (r.profile) cacheProfile(State.user, r.profile);  // 服务端回显含其落库的 avatar/昵称
+    // 用回显(有则)刷新本机自己的资料
+    if (r.profile) { State.nick = r.profile.nickname || ''; State.sig = r.profile.signature || ''; State.avatar = r.profile.avatar || ''; }
+    if (tip) { tip.style.color = '#07c160'; tip.textContent = '已保存 ✓'; }
+    updateMeBar(); renderConvs(); renderMsgs();
+  } else if (tip) { tip.style.color = '#e64340'; tip.textContent = '保存失败: ' + ((r && r.code) || '超时'); }
+}
+// 顶栏 "我" 区渲染: 头像 + 昵称 + 用户名
+function updateMeBar() {
+  if (!State.user) return;
+  const nmEl = $('meName'); if (nmEl) nmEl.textContent = nickOf(State.user);
+  const muEl = $('meUser'); if (muEl) muEl.textContent = State.user;
+  setPfp($('meAvatar'), State.avatar, nickOf(State.user));
+}
+
+// ---- 他人资料卡 (点单聊会话的头部/名片) ----
+function renderProfileCard(p) {
+  // 兼容 server 应答 {type:'profile', profile:{username,nickname,signature,avatar}}
+  const prof = (p && p.profile) ? p.profile : (p || {});
+  if (!prof) return;
+  const u = prof.username || State.chatPeer || '';
+  const nmEl = $('peerName'); if (nmEl) nmEl.textContent = prof.nickname || u;
+  const uuEl = $('peerUser'); if (uuEl) uuEl.textContent = u;
+  const ssEl = $('peerSig');  if (ssEl) ssEl.textContent = prof.signature || '未填写';
+  setPfp($('peerAvatar'), prof.avatar, prof.nickname || u);
+  $('peerModal').classList.remove('hidden');
+}
+async function showPeerCard(user) {
+  if (!user) return;
+  // 先用已知信息立刻展示
+  const p = profileOf(user);
+  renderProfileCard(p ? { username: user, nickname: p.nickname || user, signature: p.signature, avatar: p.avatar } : { username: user });
+  const got = await hitProfile(user);
+  if (got) renderProfileCard(got);
+}
+function closePeerCard() { $('peerModal').classList.add('hidden'); }
+
 // ---------- 事件绑定 ----------
 $('newGrp').onclick = createGroup;
 $('devicesBtn').onclick = showDevices;
@@ -492,6 +696,22 @@ $('logout').onclick = logout;
 $('chatback').onclick = () => { $('chatbox').classList.remove('open'); State.view = null; refreshConvs(); };
 $('sendbtn').onclick = sendMsg;
 $('inp').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
+
+// ---- 个人资料 / 头像 / 昵称 (改造新增的绑定) ----
+$('meInfo').onclick = openMyProfile;                         // 顶栏头像/昵称 → 我的资料
+$('myClose').onclick = closeMyProfile;
+$('myMask').onclick = closeMyProfile;
+$('mySaveBtn').onclick = () => { saveMyProfile(); };
+$('myAvBtn').onclick = () => { const fi = $('myAvFile'); if (fi && fi.click) fi.click(); };
+$('myAvFile').addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; if (f) { onAvatarChosen(f); e.target.value = ''; } });
+// 聊天头部左侧 (头像/名字) 在 1:1 会话可点开对方名片
+$('chatHeadInfo').onclick = () => { if (State.view && !isGroup(State.view)) showPeerCard(State.view); };
+$('viewProfile').onclick = () => { if (State.view && !isGroup(State.view)) showPeerCard(State.view); };
+$('peerClose').onclick = closePeerCard;
+$('peerMask').onclick = closePeerCard;
+// 群/设备弹窗的关闭按钮 (html 里新增的 ×)
+$('gClose').onclick = hideModal;
+$('devClose').onclick = hideDevices;
 
 // 载入时恢复登录态 (token 持久化在 localStorage): 有 token 则 connect 后自动 tokenLogin
 try {
