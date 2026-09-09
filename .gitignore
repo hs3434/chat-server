@@ -7,3 +7,7 @@ impl_lua/
 __pycache__/
 .env
 gh/
+web/uploads/
+node_modules/
+tests/frontend/node_modules/
+tests/frontend/test-results/
