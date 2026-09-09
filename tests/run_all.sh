@@ -33,6 +33,7 @@ restart_clean() {
 
 run_one() {
     name="$1"; script="$2"
+    export WXLIKE_TEST_DB="$DIR/wxlike_go.db"  # 可移植: 测试读这库(server --dir 的 DB), CI/本地一致
     restart_clean
     echo "--- $name ---"
     local runner="$PY"

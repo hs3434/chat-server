@@ -12,7 +12,7 @@ import websockets
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8081
 URL = f"ws://127.0.0.1:{PORT}/ws"
-DB = "/workspace/wxlike-server/wxlike_go.db"
+DB = __import__("os").environ.get("WXLIKE_TEST_DB", "/workspace/wxlike-server/wxlike_go.db")
 SERVER_PID = None  # 由外部传入
 FAIL = []
 
