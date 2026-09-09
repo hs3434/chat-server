@@ -46,7 +46,9 @@ run_one() {
         if grep -q "ALL-PASS" "/tmp/${name}_out.txt"; then
             echo "  ✅ $name ALL-PASS"
         else
-            echo "  ❌ $name HAS-FAIL"; FAIL=1
+            echo "  ❌ $name HAS-FAIL (exit=0, 无 ALL-PASS); 明细尾部:"
+            tail -6 "/tmp/${name}_out.txt" | sed 's/^/    /'
+            FAIL=1
         fi
     else
         echo "  ❌ $name CRASH (exit=$?)"; FAIL=1
