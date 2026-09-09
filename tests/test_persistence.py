@@ -20,8 +20,8 @@ import websockets
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8081
 URL = f"ws://127.0.0.1:{PORT}/ws"
 DB = __import__("os").environ.get("WXLIKE_TEST_DB", "/workspace/wxlike-server/wxlike_go.db")
-BIN = "/workspace/wxlike-server/bin/wxlike-go"
-DIR = "/workspace/wxlike-server"
+BIN = __import__("os").environ.get("WXLIKE_BIN", "/workspace/wxlike-server/bin/wxlike-go")
+DIR = __import__("os").environ.get("WXLIKE_DIR", "/workspace/wxlike-server")
 
 
 def restart_server():

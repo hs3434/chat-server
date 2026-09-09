@@ -34,6 +34,8 @@ restart_clean() {
 run_one() {
     name="$1"; script="$2"
     export WXLIKE_TEST_DB="$DIR/wxlike_go.db"  # 可移植: 测试读这库(server --dir 的 DB), CI/本地一致
+    export WXLIKE_BIN="$BIN"                     # persistence 自重启用同一 server 二进制
+    export WXLIKE_DIR="$DIR"                     # persistence --dir 用 server 工作目录
     restart_clean
     echo "--- $name ---"
     local runner="$PY"
