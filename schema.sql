@@ -5,7 +5,10 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS accounts (
   username TEXT PRIMARY KEY,
   password TEXT NOT NULL,
-  created_at INTEGER DEFAULT (unixepoch())
+  created_at INTEGER DEFAULT (unixepoch()),
+  nickname TEXT DEFAULT '',      -- 昵称 (展示用, 空=回落 username)
+  signature TEXT DEFAULT '',     -- 一句话签名
+  avatar TEXT DEFAULT ''         -- 头像文件名 (web/uploads 下, 空=首字母占位)
 );
 
 CREATE TABLE IF NOT EXISTS groups (
