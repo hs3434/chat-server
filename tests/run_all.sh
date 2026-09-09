@@ -95,6 +95,7 @@ run_one "groupmembers"   "test_group_members.py"
 
 RATE_FLAG="--reg-limit 0"  # 设备会话管理
 run_one "devices"        "test_devices.py"
+run_one "profile"        "test_profile.py"
 
 echo ""
 echo "==================== 结果 ===================="
