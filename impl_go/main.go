@@ -12,6 +12,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"log"
 	"net"
 	"net/http"
@@ -92,6 +96,22 @@ func NewStore(dbPath, schemaPath string) (*Store, error) {
 	}
 	if _, err := db.Exec(string(schema)); err != nil {
 		return nil, err
+	}
+	// 迁移: 老库(accounts 无个人资料列)加列。CREATE TABLE IF NOT EXISTS 对已有表不生效,
+	// 需逐个检查列存在再 ALTER (幂等, 兼容已部署的线上库)。
+	cols := map[string]string{
+		"nickname":  "TEXT DEFAULT ''",
+		"signature": "TEXT DEFAULT ''",
+		"avatar":    "TEXT DEFAULT ''",
+	}
+	for col, typ := range cols {
+		var n int
+		db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name=?", col).Scan(&n)
+		if n == 0 {
+			if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN " + col + " " + typ); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -280,6 +300,43 @@ func (s *Store) UserExists(user string) bool {
 	return n > 0
 }
 
+// Profile 用户公开资料
+type Profile struct {
+	Username  string `json:"username"`
+	Nickname  string `json:"nickname"`
+	Signature string `json:"signature"`
+	Avatar    string `json:"avatar"` // 头像文件名 (/uploads/<file>), 空=首字母占位
+	CreatedAt int64  `json:"created_at"`
+}
+
+// GetProfile 取用户资料; 不存在返回 ok=false
+func (s *Store) GetProfile(user string) (Profile, bool) {
+	var p Profile
+	var nickname, signature, avatar string
+	var created int64
+	err := s.db.QueryRow(
+		"SELECT username, COALESCE(nickname,''), COALESCE(signature,''), COALESCE(avatar,''), COALESCE(created_at,0) FROM accounts WHERE username=?",
+		user).Scan(&p.Username, &nickname, &signature, &avatar, &created)
+	if err != nil {
+		return Profile{}, false
+	}
+	p.Nickname, p.Signature, p.Avatar, p.CreatedAt = nickname, signature, avatar, created
+	return p, true
+}
+
+// UpdateProfile 保存自己的昵称/签名/头像 (只更新提供非空的字段)
+func (s *Store) UpdateProfile(user, nickname, signature, avatar string) {
+	if nickname != "" {
+		s.db.Exec("UPDATE accounts SET nickname=? WHERE username=?", nickname, user)
+	}
+	if signature != "" {
+		s.db.Exec("UPDATE accounts SET signature=? WHERE username=?", signature, user)
+	}
+	if avatar != "" {
+		s.db.Exec("UPDATE accounts SET avatar=? WHERE username=?", avatar, user)
+	}
+}
+
 // Peers 与 user 有往来的人: 单聊互发过 或 同群成员 (上线/下线通知用)
 func (s *Store) Peers(user string) []string {
 	seen := map[string]bool{}
@@ -332,6 +389,7 @@ type Server struct {
 	tokens  map[string]string               // token -> user (请求级认证)
 	wsmu    map[*websocket.Conn]*sync.Mutex // 每连接写锁 (deliver/心跳/业务并发安全)
 	devices map[*websocket.Conn]*ConnMeta   // 连接会话元数据 (设备管理)
+	upDir   string                          // 头像上传保存目录 (web/uploads)
 
 	// 限流/防刷 (内存态)
 	msgLimiter   *MsgRateLimiter
@@ -555,6 +613,107 @@ func (s *Server) userByToken(tok string) string {
 	return s.tokens[tok]
 }
 
+// uploadHandler 头像上传: POST /upload?token=<login_token>, multipart 字段 file
+// 服务端自动压缩: 用标准库 image 解码(jpg/png/gif; 网页头像多为这些), 缩放到最长边≤400,
+// 统一编码 png 存到 web/uploads/<随机hex>.png, 更新该用户 avatar, 返回 {url}
+// 未支持的图(decode 失败, 如动画 webp)返回 400 提示格式。
+func (s *Server) uploadHandler() http.HandlerFunc {
+	const maxW = 400 // 头像最长边 (压缩后, 兼顾清晰度与体积)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		user := s.userByToken(r.URL.Query().Get("token"))
+		if user == "" || s.store.UserExists(user) == false {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if err := r.ParseMultipartForm(16 << 20); err != nil { // 上限 16MB, 之后压缩
+			http.Error(w, "bad multipart: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "missing file field", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// 解码 (标准库自带 jpg/png/gif decoder; 其它格式如 webp 若不支持 decode 会报错)
+		img, _, err := image.Decode(file)
+		if err != nil {
+			http.Error(w, "unsupported image format (需要 jpg/png/gif): "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// 缩放: 最长边>maxW 则等比缩小 (双线性近似; 头像足够, 避免额外依赖)
+		b := img.Bounds()
+		w0, h0 := b.Dx(), b.Dy()
+		toEnc := img
+		if w0 > maxW || h0 > maxW {
+			dst := scaleNearest(img, maxW)
+			toEnc = dst
+		}
+
+		// 编码 png 存盘
+		os.MkdirAll(filepath.Join(s.upDir), 0o755)
+		fname := fmt.Sprintf("a_%s_%d.png", hex.EncodeToString([]byte(user))[:min(12, len(hex.EncodeToString([]byte(user))))], time.Now().UnixMilli())
+		outPath := filepath.Join(s.upDir, fname)
+		fw, err := os.Create(outPath)
+		if err != nil {
+			http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer fw.Close()
+		if err := png.Encode(fw, toEnc); err != nil {
+			http.Error(w, "encode failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.store.UpdateProfile(user, "", "", fname)
+		url := "/uploads/" + fname
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"url":%q,"user":%q}`, url, user)
+	}
+}
+
+// scaleNearest 等比缩放到最长边不超过 maxW (最近邻采样, 纯标准库无额外依赖)
+func scaleNearest(src image.Image, maxW int) image.Image {
+	b := src.Bounds()
+	w0, h0 := b.Dx(), b.Dy()
+	scale := float64(maxW) / float64(maxW) // 占位, 下面按比例
+	_ = scale
+	nw, nh := w0, h0
+	if w0 > h0 {
+		nw, nh = maxW, int(float64(h0)*(float64(maxW)/float64(w0)))
+	} else {
+		nw, nh = int(float64(w0)*(float64(maxW)/float64(h0))), maxW
+	}
+	if nw < 1 {
+		nw = 1
+	}
+	if nh < 1 {
+		nh = 1
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
+	xr := float64(w0) / float64(nw)
+	yr := float64(h0) / float64(nh)
+	for y := 0; y < nh; y++ {
+		sy := b.Min.Y + int(float64(y)*yr)
+		if sy > b.Max.Y-1 {
+			sy = b.Max.Y - 1
+		}
+		for x := 0; x < nw; x++ {
+			sx := b.Min.X + int(float64(x)*xr)
+			if sx > b.Max.X-1 {
+				sx = b.Max.X - 1
+			}
+			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	return dst
+}
+
 func (s *Server) removeConn(user string, ws *websocket.Conn) {
 	s.mu.Lock()
 	becameOffline := false
@@ -712,7 +871,66 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		reply(map[string]interface{}{"type": "error", "code": code})
 	}
 	loginOK := func(u, tok string) {
-		reply(map[string]interface{}{"type": "login_ok", "user": u, "token": tok})
+		obj := map[string]interface{}{"type": "login_ok", "user": u, "token": tok}
+		if p, ok := s.store.GetProfile(u); ok {
+			obj["nickname"] = p.Nickname
+			obj["signature"] = p.Signature
+			obj["avatar"] = p.Avatar
+		}
+		reply(obj)
+	}
+
+	// get_profile: 查任意用户公开资料卡 (需已登录; toUser 存在才返回)
+	if act == "get_profile" {
+		if user == "" {
+			errReply("unauthorized")
+			return user
+		}
+		toUser, _ := msg["to_user"].(string)
+		if toUser == "" {
+			toUser, _ = msg["user"].(string)
+		}
+		if toUser == "" {
+			errReply("bad_param")
+			return user
+		}
+		if p, ok := s.store.GetProfile(toUser); ok {
+			reply(map[string]interface{}{"type": "profile", "profile": p})
+		} else {
+			errReply("no_such_user")
+		}
+		return user
+	}
+
+	// set_profile: 保存自己的资料 (需已登录成功)
+	if act == "set_profile" {
+		if user == "" {
+			errReply("unauthorized")
+			return user
+		}
+		nick, _ := msg["nickname"].(string)
+		sig, _ := msg["signature"].(string)
+		av, _ := msg["avatar"].(string)
+		s.store.UpdateProfile(user, nick, sig, av)
+		// 成功: 回显自己最新资料 + 推送给「有会话的人」实时刷新昵称/头像
+		if p, ok := s.store.GetProfile(user); ok {
+			reply(map[string]interface{}{"type": "profile_ok", "profile": p})
+		} else {
+			reply(map[string]interface{}{"type": "profile_ok"})
+		}
+		peers := s.store.Peers(user)
+		evt := map[string]interface{}{"type": "profile_evt", "user": user}
+		if p, ok := s.store.GetProfile(user); ok {
+			evt["nickname"] = p.Nickname
+			evt["signature"] = p.Signature
+			evt["avatar"] = p.Avatar
+		}
+		for _, peer := range peers {
+			for _, c := range s.onlineConns(peer) {
+				s.writeJSON(c, evt)
+			}
+		}
+		return user
 	}
 
 	if act == "login" {
@@ -1173,8 +1391,11 @@ func main() {
 	// 前端静态文件: / -> web 目录 (手机浏览器直接访问根路径)
 	if *web != "" {
 		go func() { log.Printf("web static serving %s at /", *web) }()
+		srv.upDir = filepath.Join(*web, "uploads")
+		os.MkdirAll(srv.upDir, 0o755)
 		http.Handle("/", http.FileServer(http.Dir(*web)))
-		http.HandleFunc("/ws", srv.wsHandler) // WS 协议在 /ws
+		http.HandleFunc("/ws", srv.wsHandler)           // WS 协议在 /ws
+		http.HandleFunc("/upload", srv.uploadHandler()) // 头像上传 (图形压缩)
 	} else {
 		http.HandleFunc("/", srv.wsHandler) // 纯协议模式: WS 在根
 	}
