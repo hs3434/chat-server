@@ -72,6 +72,7 @@ function req(obj, wantType, timeout = 4000) {
 function handleServer(m) {
   switch (m.type) {
     case 'login_ok': {
+      resolveReq(m.seq, m);   // 命中 req() 的 pending (token_login/login 都靠它), 否则 await 永不 resolve -> 误判超时登出
       State.user = m.user;
       State.token = m.token;
       // 登录带上自己 profile (服务器 set 过才有; 空回落 username)
@@ -335,16 +336,29 @@ function sendMsg() {
 
 // ---------- 登录/注册 ----------
 async function tokenLogin() {
-  // 断线重连: 凭 token 恢复会话 (不重输密码, 不存密码)
-  const r = await req({ type: 'token_login', token: State.token }, 'login_ok');
-  if (!r || r.type === 'error') {
-    // token 失效: 回登录页
-    logout();
-    return;
-  }
-  State.user = r.user;
-  State.token = r.token;
-  completeLogin();
+  // 断线重连/刷新: 凭 token 恢复会话 (不重输密码, 不存密码)
+  // 去重: 已登录(State.user)或已有一次在飞(tokLog)的并发 tokenLogin 一律忽略——
+  //  否则多余的一次超时会误把已恢复的会话拉回登录窗。
+  if (State._tokLog || State.user) return;
+  State._tokLog = true;
+  try {
+    const r = await req({ type: 'token_login', token: State.token }, 'login_ok', 5000);
+    if (!r || r.type === 'error') {
+      if (r && r.type === 'error') { logout(); return; }  // 服务端显式拒绝: token 真失效, 登出
+      sessionLoss();                     // null = 请求超时/临时网络抖: 不清本地 token, 稍后可重试恢复
+      return;
+    }
+    State.user = r.user;
+    State.token = r.token;
+    completeLogin();
+  } finally { State._tokLog = false; }
+}
+
+// 临时无法恢复会话: 只回登录界面, 但保留 localStorage token —— 网络抖动不销毁登录态,
+// 下次刷新/重连仍能凭该 token 自动恢复 (仅服务端明确拒绝 token 时才真正登出)。
+function sessionLoss() {
+  $('app').classList.add('hidden');
+  $('auth').classList.remove('hidden');
 }
 
 async function doLogin(regToo) {
