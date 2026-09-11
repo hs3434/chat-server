@@ -134,6 +134,9 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
     <button class="btn-primary" id="loginBtn">登录</button>
     <button class="btn-ghost" id="regBtn">注册并登录</button>
   </div>
+  <div style="margin-top:10px;text-align:center">
+    <a href="javascript:void(0)" id="forgotLink" style="color:#576b95;font-size:13px;text-decoration:none">忘记密码？</a>
+  </div>
 </div>
 
 <!-- 主界面 -->
@@ -224,10 +227,55 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
       <label>个性签名</label>
       <textarea id="mySig" maxlength="60"></textarea>
     </div>
+    <div class="prof-field" style="border-top:1px solid #f0f0f0;padding-top:12px">
+      <label>邮箱(找回密码用)</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="myEmail" placeholder="未绑定" style="flex:1" autocomplete="email">
+        <button class="btn-op" id="myEmailBtn" style="flex:none;white-space:nowrap">获取验证码</button>
+      </div>
+      <div id="myCodeRow" class="hidden" style="gap:8px;margin-top:8px">
+        <input id="myCode" placeholder="6位验证码" maxlength="6" style="flex:1">
+        <button class="btn-primary" id="myCodeBtn" style="flex:none">绑定</button>
+      </div>
+      <div id="myEmailTip" style="color:#999;font-size:12px;min-height:16px;margin-top:4px"></div>
+    </div>
+    <div class="prof-field" style="border-top:1px solid #f0f0f0;padding-top:12px">
+      <label>修改密码</label>
+      <input id="myOldPass" type="password" placeholder="当前密码" autocomplete="current-password">
+      <input id="myNewPass" type="password" placeholder="新密码" style="margin-top:8px" autocomplete="new-password">
+      <button class="btn-ghost" id="myPassBtn" style="width:100%;margin-top:8px">确认修改密码</button>
+      <div id="myPassTip" style="color:#999;font-size:12px;min-height:16px;margin-top:4px"></div>
+    </div>
     <div class="prof-field" id="myTip" style="color:#07c160;font-size:12px;min-height:16px"></div>
     <div class="prof-actions">
       <button class="btn-primary" id="mySaveBtn" style="flex:none;width:100%">保存</button>
     </div>
+  </div>
+</div>
+
+<!-- 忘记密码 modal -->
+<div id="forgotModal" class="hidden">
+  <div class="mask" id="forgotMask"></div>
+  <div class="panel">
+    <span class="panel-close" id="forgotClose">&times;</span>
+    <h3>找回密码</h3>
+    <div class="prof-field">
+      <label>用户名或邮箱</label>
+      <input id="fgIdent" placeholder="输入用户名或已绑定邮箱" autocomplete="username">
+    </div>
+    <button class="btn-primary" id="fgSendBtn" style="width:100%">发送验证码</button>
+    <div id="fgCodeRow" class="hidden" style="margin-top:12px">
+      <div class="prof-field">
+        <label>邮箱验证码</label>
+        <input id="fgCode" placeholder="6位验证码" maxlength="6">
+      </div>
+      <div class="prof-field">
+        <label>新密码</label>
+        <input id="fgNewPass" type="password" placeholder="设置新密码" autocomplete="new-password">
+      </div>
+      <button class="btn-primary" id="fgResetBtn" style="width:100%">重置密码</button>
+    </div>
+    <div id="fgTip" style="color:#999;font-size:12px;min-height:16px;margin-top:8px"></div>
   </div>
 </div>
 

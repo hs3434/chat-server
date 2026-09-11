@@ -103,6 +103,7 @@ func NewStore(dbPath, schemaPath string) (*Store, error) {
 		"nickname":  "TEXT DEFAULT ''",
 		"signature": "TEXT DEFAULT ''",
 		"avatar":    "TEXT DEFAULT ''",
+		"email":     "TEXT DEFAULT ''",
 	}
 	for col, typ := range cols {
 		var n int
@@ -112,6 +113,22 @@ func NewStore(dbPath, schemaPath string) (*Store, error) {
 				return nil, err
 			}
 		}
+	}
+	// 邮箱验证码 / 密码重置码表 (邮箱绑定与找回密码共用)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS email_codes(
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		email TEXT NOT NULL,
+		code TEXT NOT NULL,
+		purpose TEXT NOT NULL,        -- 'bind' 绑定邮箱 | 'reset' 找回密码
+		expires_at INTEGER NOT NULL,  -- 毫秒时间戳
+		used INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL
+	)`); err != nil {
+		return nil, err
+	}
+	// 用户绑定邮箱的唯一索引(空串允许多行: 未绑定)
+	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email) WHERE email <> ''"); err != nil {
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }
@@ -877,6 +894,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			obj["signature"] = p.Signature
 			obj["avatar"] = p.Avatar
 		}
+		obj["email"] = s.store.EmailOf(u)
 		reply(obj)
 	}
 
@@ -1005,6 +1023,78 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		return user
 	}
 
+	// ---- 找回密码 (未登录可用) ----
+	// request_reset: 提交用户名(user 或 email 字段) -> 若绑定了邮箱则发重置码。响应统一不泄露账号是否存在。
+	if act == "request_reset" {
+		ident, _ := msg["user"].(string)
+		if ident == "" {
+			ident, _ = msg["email"].(string)
+		}
+		ident = strings.TrimSpace(ident)
+		// 允许用用户名或邮箱发起
+		target := s.store.UserByEmail(ident)
+		if target == "" {
+			// 当作用户名
+			var e string
+			s.store.db.QueryRow("SELECT COALESCE(email,'') FROM accounts WHERE username=?", ident).Scan(&e)
+			if e != "" {
+				target = ident
+			}
+		}
+		if target != "" {
+			email := s.store.EmailOf(target)
+			if email != "" {
+				code, err := s.store.CreateCode(email, "reset")
+				if err == nil {
+					go func() { _ = sendCode(email, code, "reset") }()
+				}
+			}
+		}
+		// 无论账号/邮箱是否存在都回 ok (防枚举)
+		reply(map[string]interface{}{"type": "reset_sent"})
+		return user
+	}
+
+	// reset_password: 邮箱/用户名 + 验证码 + 新密码 -> 重置
+	if act == "reset_password" {
+		ident, _ := msg["user"].(string)
+		if ident == "" {
+			ident, _ = msg["email"].(string)
+		}
+		code, _ := msg["code"].(string)
+		newPass, _ := msg["new_pass"].(string)
+		ident = strings.TrimSpace(ident)
+		if code == "" || newPass == "" {
+			errReply("bad_request")
+			return user
+		}
+		// 定位用户
+		target := s.store.UserByEmail(ident)
+		email := ""
+		if target != "" {
+			email = ident
+		} else {
+			email = s.store.EmailOf(ident)
+			if email != "" {
+				target = ident
+			}
+		}
+		if target == "" || email == "" {
+			errReply("invalid_code")
+			return user
+		}
+		if !s.store.VerifyCode(email, "reset", code) {
+			errReply("invalid_code")
+			return user
+		}
+		if err := s.store.SetPassword(target, newPass); err != nil {
+			errReply("server_error")
+			return user
+		}
+		reply(map[string]interface{}{"type": "reset_ok"})
+		return user
+	}
+
 	// token 认证: 未登录连接可凭 token 执行业务请求 (login/register 已在上方处理)
 	if user == "" {
 		if tok, ok := msg["token"].(string); ok && tok != "" {
@@ -1017,6 +1107,70 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		} else {
 			return ""
 		}
+	}
+
+	// ---- 账号安全 (需登录) ----
+	// set_password: 旧密码校验 -> 更新新密码 (自助改密)
+	if act == "set_password" {
+		oldPass, _ := msg["old_pass"].(string)
+		newPass, _ := msg["new_pass"].(string)
+		if newPass == "" {
+			errReply("bad_request")
+			return user
+		}
+		if !s.store.CheckPassword(user, oldPass) {
+			errReply("wrong_password")
+			return user
+		}
+		if err := s.store.SetPassword(user, newPass); err != nil {
+			errReply("server_error")
+			return user
+		}
+		reply(map[string]interface{}{"type": "password_ok"})
+		return user
+	}
+
+	// send_email_code: 绑定邮箱 -> 发验证码到该邮箱 (校验格式 + 未被占用)
+	if act == "send_email_code" {
+		email, _ := msg["email"].(string)
+		email = strings.TrimSpace(strings.ToLower(email))
+		if !validEmail(email) {
+			errReply("invalid_email")
+			return user
+		}
+		if s.store.EmailTaken(email) && s.store.EmailOf(user) != email {
+			errReply("email_taken")
+			return user
+		}
+		code, err := s.store.CreateCode(email, "bind")
+		if err != nil {
+			errReply("server_error")
+			return user
+		}
+		go func() { _ = sendCode(email, code, "bind") }()
+		reply(map[string]interface{}{"type": "email_code_sent"})
+		return user
+	}
+
+	// verify_email: 邮箱 + 验证码 -> 绑定成功
+	if act == "verify_email" {
+		email, _ := msg["email"].(string)
+		code, _ := msg["code"].(string)
+		email = strings.TrimSpace(strings.ToLower(email))
+		if !validEmail(email) || code == "" {
+			errReply("bad_request")
+			return user
+		}
+		if !s.store.VerifyCode(email, "bind", code) {
+			errReply("invalid_code")
+			return user
+		}
+		if err := s.store.SetEmail(user, email); err != nil {
+			errReply("server_error")
+			return user
+		}
+		reply(map[string]interface{}{"type": "email_ok", "email": email})
+		return user
 	}
 
 	if act == "ack_received" {

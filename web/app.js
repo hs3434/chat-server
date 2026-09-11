@@ -34,6 +34,7 @@ function connect() {
   const ws = new WebSocket(wsUrl());
   ws.onopen = () => {
     State.reconnectAttempt = 0;
+    flushOutbox();               // 补发连接建立前排队的请求
     if (State.token) { tokenLogin(); }
     else console.log('ws open (未登录)');
   };
@@ -55,6 +56,18 @@ function connect() {
 
 function send(obj) {
   if (State.ws && State.ws.readyState === 1) State.ws.send(JSON.stringify(obj));
+  else {
+    // ws 尚未就绪(刷新/重连瞬间): 排队, 连接打开后补发, 避免静默丢失请求
+    State._outbox = State._outbox || [];
+    State._outbox.push(obj);
+  }
+}
+// 连接打开后冲刷排队请求
+function flushOutbox() {
+  if (!State._outbox || !State._outbox.length) return;
+  if (!(State.ws && State.ws.readyState === 1)) return;
+  const q = State._outbox; State._outbox = [];
+  for (const o of q) { try { State.ws.send(JSON.stringify(o)); } catch (e) {} }
 }
 
 // 请求-响应封装: 发动作并等待特定 type 响应 (带等待队列)
@@ -79,6 +92,7 @@ function handleServer(m) {
       State.nick = m.nickname || '';
       State.avatar = m.avatar || '';
       State.sig = m.signature || '';
+      State.email = m.email || '';
       if (State.user) cacheProfile(State.user, { nickname: State.nick, signature: State.sig, avatar: State.avatar });
       completeLogin();
       break;
@@ -125,6 +139,11 @@ function handleServer(m) {
     case 'presence': resolveReq(m.seq, m); break;
     case 'register_ok': resolveReq(m.seq, m); break;
     case 'group_ok': resolveReq(m.seq, m); break;
+    case 'password_ok': resolveReq(m.seq, m); break;      // 改密成功
+    case 'email_code_sent': resolveReq(m.seq, m); break;  // 邮箱验证码已发
+    case 'email_ok': resolveReq(m.seq, m); break;         // 邮箱绑定成功
+    case 'reset_sent': resolveReq(m.seq, m); break;       // 找回密码: 码已发
+    case 'reset_ok': resolveReq(m.seq, m); break;         // 密码重置成功
     case 'error': resolveReq(m.seq, m); break;
     case 'conversations_refresh': // 服务器通知会话列表有变化 (如被拉进群)
       refreshConvs();
@@ -718,6 +737,77 @@ $('myMask').onclick = closeMyProfile;
 $('mySaveBtn').onclick = () => { saveMyProfile(); };
 $('myAvBtn').onclick = () => { const fi = $('myAvFile'); if (fi && fi.click) fi.click(); };
 $('myAvFile').addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; if (f) { onAvatarChosen(f); e.target.value = ''; } });
+
+// ---------- 账号安全: 绑定邮箱 / 修改密码 / 忘记密码 ----------
+function refreshEmailRow() {
+  const em = State.email || '';
+  const inp = $('myEmail'); if (inp) inp.value = em;
+  $('myEmailTip').textContent = em ? '已绑定: ' + em : '未绑定邮箱(绑定后可用于找回密码)';
+}
+$('myEmailBtn').onclick = async () => {
+  const em = ($('myEmail').value || '').trim();
+  if (!em) { $('myEmailTip').textContent = '请输入邮箱'; return; }
+  $('myEmailTip').textContent = '发送中…';
+  const r = await req({ type: 'send_email_code', email: em }, 'email_code_sent');
+  if (!r || r.type === 'error') {
+    $('myEmailTip').textContent = ({ invalid_email: '邮箱格式不正确', email_taken: '该邮箱已被绑定' }[r && r.code] || '发送失败');
+    return;
+  }
+  $('myEmailTip').textContent = '验证码已发送，请查收邮箱';
+  $('myCodeRow').classList.remove('hidden');
+  $('myCodeRow').style.display = 'flex';
+};
+$('myCodeBtn').onclick = async () => {
+  const em = ($('myEmail').value || '').trim();
+  const code = ($('myCode').value || '').trim();
+  if (!code) { $('myEmailTip').textContent = '请输入验证码'; return; }
+  const r = await req({ type: 'verify_email', email: em, code }, 'email_ok');
+  if (!r || r.type === 'error') { $('myEmailTip').textContent = '验证码错误或已过期'; return; }
+  State.email = r.email;
+  $('myCodeRow').classList.add('hidden');
+  refreshEmailRow();
+  $('myEmailTip').textContent = '邮箱绑定成功 ✓';
+};
+$('myPassBtn').onclick = async () => {
+  const op = $('myOldPass').value, np = $('myNewPass').value;
+  if (!op || !np) { $('myPassTip').textContent = '请填写当前密码与新密码'; return; }
+  const r = await req({ type: 'set_password', old_pass: op, new_pass: np }, 'password_ok');
+  if (!r || r.type === 'error') {
+    $('myPassTip').textContent = ({ wrong_password: '当前密码不正确', bad_request: '新密码不能为空' }[r && r.code] || '修改失败');
+    return;
+  }
+  $('myOldPass').value = ''; $('myNewPass').value = '';
+  $('myPassTip').textContent = '密码修改成功 ✓';
+};
+
+// 忘记密码弹窗
+function openForgot() { $('forgotModal').classList.remove('hidden'); $('fgTip').textContent = ''; }
+function closeForgot() { $('forgotModal').classList.add('hidden'); }
+$('forgotLink').onclick = openForgot;
+$('forgotClose').onclick = closeForgot;
+$('forgotMask').onclick = closeForgot;
+$('fgSendBtn').onclick = async () => {
+  const ident = ($('fgIdent').value || '').trim();
+  if (!ident) { $('fgTip').textContent = '请输入用户名或邮箱'; return; }
+  $('fgTip').textContent = '发送中…';
+  const r = await req({ type: 'request_reset', user: ident }, 'reset_sent');
+  if (!r) { $('fgTip').textContent = '网络错误，请重试'; return; }
+  $('fgTip').textContent = '若该账号已绑定邮箱，验证码已发送（请查收）';
+  $('fgCodeRow').classList.remove('hidden');
+};
+$('fgResetBtn').onclick = async () => {
+  const ident = ($('fgIdent').value || '').trim();
+  const code = ($('fgCode').value || '').trim();
+  const np = $('fgNewPass').value;
+  if (!code || !np) { $('fgTip').textContent = '请填写验证码与新密码'; return; }
+  const r = await req({ type: 'reset_password', user: ident, code, new_pass: np }, 'reset_ok');
+  if (!r || r.type === 'error') { $('fgTip').textContent = '验证码错误或已过期'; return; }
+  $('fgTip').textContent = '密码已重置 ✓ 请返回登录';
+  setTimeout(closeForgot, 1200);
+};
+// 打开我的资料时刷新邮箱显示
+const _openMyProfile = openMyProfile;
+openMyProfile = function () { _openMyProfile(); State.email = State.email || ''; refreshEmailRow(); };
 // 聊天头部左侧 (头像/名字) 在 1:1 会话可点开对方名片
 $('chatHeadInfo').onclick = () => { if (State.view && !isGroup(State.view)) showPeerCard(State.view); };
 $('viewProfile').onclick = () => { if (State.view && !isGroup(State.view)) showPeerCard(State.view); };
