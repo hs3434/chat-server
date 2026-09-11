@@ -349,6 +349,14 @@ function sendMsg() {
   const payload = { type: 'msg', to, body };
   if (isGroup(to)) payload.is_group = true;
   send(payload);
+  // 本地回显: 单聊服务器不回显给发送者, 发送后立即本地追加 (微信式: 自己发的立刻可见)
+  // 群聊服务端会把消息 deliver 回 sender, 无需本地回显 (避免重复)。
+  if (!isGroup(to)) {
+    if (!State.msgs[to]) State.msgs[to] = [];
+    State.msgs[to].push({ id: -Date.now(), from: State.user, body, ts: Date.now(), state: 'sent' });
+    if (State.view === to) renderMsgs();
+    refreshConvs();
+  }
   inp.value = '';
   inp.focus();
 }
