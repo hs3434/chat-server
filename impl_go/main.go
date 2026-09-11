@@ -913,6 +913,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			return user
 		}
 		if p, ok := s.store.GetProfile(toUser); ok {
+			// 直接回传 Profile struct: username/nickname/signature/avatar/created_at 全带 (json tag 已定义)
 			reply(map[string]interface{}{"type": "profile", "profile": p})
 		} else {
 			errReply("no_such_user")
@@ -1226,6 +1227,8 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 				}
 			}
 		}
+		// 回执确认 (带 seq): 前端 ackAllUnread 逐条 await 本响应, 无回包会每条死等超时
+		reply(map[string]interface{}{"type": "ack_read"})
 		return user
 	}
 
@@ -1293,6 +1296,24 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 	if act == "add_member" {
 		gid, _ := msg["gid"].(string)
 		u, _ := msg["user"].(string)
+		gid = strings.TrimPrefix(strings.TrimPrefix(gid, "group::"), "group:")
+		// 权限与合法性 (微信语义: 群内所有成员都可拉人; 非成员不能拉; 目标必须是真实存在且未入群的用户)
+		if !s.store.GroupExists(gid) {
+			errReply("group_not_found")
+			return user
+		}
+		if !s.store.UserExists(u) {
+			errReply("no_such_user")
+			return user
+		}
+		if !s.store.IsGroupMember(gid, user) {
+			errReply("not_member")
+			return user
+		}
+		if s.store.IsGroupMember(gid, u) {
+			errReply("already_member")
+			return user
+		}
 		if s.store.AddMember(gid, u) {
 			reply(map[string]interface{}{"type": "group_ok"})
 			// 被拉入者在线时立即刷新会话列表 (微信语义: 进群立刻看到群)
@@ -1300,7 +1321,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 				s.writeJSON(c, map[string]interface{}{"type": "conversations_refresh"})
 			}
 		} else {
-			reply(map[string]interface{}{"type": "error"})
+			errReply("add_failed")
 		}
 		return user
 	}
@@ -1326,16 +1347,21 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 	}
 
 	if act == "leave_group" {
-		// 自己退群 (群主退群 = 解散? 微信: 群主不能退群, 只能解散或转让; 这里允许退)
+		// 自己退群。微信语义: 群主不能直接退群, 需先转让群主 (否则群变无主)
 		gid, _ := msg["gid"].(string)
+		gid = strings.TrimPrefix(strings.TrimPrefix(gid, "group::"), "group:")
 		if !s.store.GroupExists(gid) {
 			errReply("group_not_found")
+			return user
+		}
+		if s.store.IsGroupOwner(gid, user) {
+			errReply("owner_must_transfer")
 			return user
 		}
 		if s.store.LeaveGroup(gid, user) {
 			reply(map[string]interface{}{"type": "group_ok"})
 		} else {
-			reply(map[string]interface{}{"type": "error"})
+			errReply("leave_failed")
 		}
 		return user
 	}

@@ -144,6 +144,8 @@ function handleServer(m) {
     case 'email_ok': resolveReq(m.seq, m); break;         // 邮箱绑定成功
     case 'reset_sent': resolveReq(m.seq, m); break;       // 找回密码: 码已发
     case 'reset_ok': resolveReq(m.seq, m); break;         // 密码重置成功
+    case 'ack_read': resolveReq(m.seq, m); break;         // 已读回执确认 (服务端已置 read)
+    case 'group_members': resolveReq(m.seq, m); break;    // 群成员列表 (群信息面板)
     case 'error': resolveReq(m.seq, m); break;
     case 'conversations_refresh': // 服务器通知会话列表有变化 (如被拉进群)
       refreshConvs();
@@ -322,15 +324,21 @@ function updateReadState(chat, id, read, total) {
 
 async function ackAllUnread(chat) {
   const arr = State.msgs[chat] || [];
-  for (const m of arr) {
-    if (m.from !== State.user && m.state !== 'read') {
-      send({ type: 'ack_received', id: m.id });
-      await req({ type: 'ack_read', id: m.id }, 'ack_read').catch(() => {});
-      m.state = 'read';
-    }
-  }
+  const unreadIds = arr.filter((m) => m.from !== State.user && m.state !== 'read').map((m) => m.id);
+  if (!unreadIds.length) return;
+  // 本地立刻置 read (不等服务器), 红点即时消失
+  unreadIds.forEach((id) => { const m = arr.find((x) => x.id === id); if (m) m.state = 'read'; });
+  // 会话列表本地先清零该会话 unread (不等 conversations 往返)
+  const conv = State.convs.find((x) => x.chat === chat);
+  if (conv) conv.unread = 0;
   renderMsgs();
-  refreshConvs(); // 未读清零
+  renderConvs();
+  // 服务器侧逐条确认: fire-and-forget (服务端已回 ack_read 带 seq, 但不逐条等待)
+  for (const id of unreadIds) {
+    send({ type: 'ack_received', id });
+    send({ type: 'ack_read', id });
+  }
+  refreshConvs(); // 与服务器对账 (拿到真实 unread 计数)
 }
 
 function ackRead(chat, id) {
@@ -461,9 +469,9 @@ async function refreshGrpInfo() {
     const me = u === State.user ? ' me' : '';
     return `<div class="member${me}"><span>${esc(u)}</span>${tag}</div>`;
   }).join('');
-  // 群主才显示管理按钮
-  $('gAdd').style.display = isOwner ? 'block' : 'none';
-  $('gAddUser').style.display = isOwner ? 'block' : 'none';
+  // 邀请入群: 所有成员都可拉人 (微信语义); 管理/转让/踢人/解散仅群主
+  $('gAdd').style.display = 'block';
+  $('gAddUser').style.display = 'block';
   $('gTransfer').style.display = isOwner ? 'block' : 'none';
   $('gKick').style.display = isOwner ? 'block' : 'none';
   $('gLeave').style.display = 'block';
@@ -495,6 +503,9 @@ async function grpAdd() {
   if (!u || !currentGid) return;
   const r = await req({ type: 'add_member', gid: currentGid, user: u }, 'group_ok');
   if (r && r.type === 'group_ok') { $('gAddUser').value = ''; refreshGrpInfo(); }
+  else if (r && r.code === 'no_such_user') alert('用户不存在: ' + u);
+  else if (r && r.code === 'already_member') alert(u + ' 已经在群里了');
+  else if (r && r.code === 'not_member') alert('你不是群成员, 不能邀请');
   else alert('加人失败: ' + (r && r.code || '未知'));
 }
 
@@ -518,6 +529,7 @@ async function grpLeave() {
   if (!currentGid || !confirm('确认退出该群?')) return;
   const r = await req({ type: 'leave_group', gid: currentGid }, 'group_ok');
   if (r && r.type === 'group_ok') { hideModal(); closeChat(); refreshConvs(); }
+  else if (r && r.code === 'owner_must_transfer') alert('群主不能直接退群, 请先在群设置里转让群主');
   else alert('退群失败: ' + (r && r.code || '未知'));
 }
 
@@ -610,6 +622,7 @@ function setPfp(el, raw, glyph) {
 function cacheProfile(u, p) {
   if (!u) return;
   State.profiles[u] = {
+    username: u, // 名片"用户名"行数据源 (之前漏存 -> 名片不显示用户名)
     nickname: (p && p.nickname) || '',
     signature: (p && p.signature) || '',
     avatar: (p && p.avatar) || '',
@@ -712,11 +725,11 @@ function renderProfileCard(p) {
 }
 async function showPeerCard(user) {
   if (!user) return;
-  // 先用已知信息立刻展示
+  // 先用已知信息立刻展示 (username 强制带上, 不依赖缓存完整性)
   const p = profileOf(user);
-  renderProfileCard(p ? { username: user, nickname: p.nickname || user, signature: p.signature, avatar: p.avatar } : { username: user });
+  renderProfileCard({ username: user, nickname: p && p.nickname || user, signature: p && p.signature, avatar: p && p.avatar });
   const got = await hitProfile(user);
-  if (got) renderProfileCard(got);
+  if (got) renderProfileCard({ ...got, username: user });
 }
 function closePeerCard() { $('peerModal').classList.add('hidden'); }
 
