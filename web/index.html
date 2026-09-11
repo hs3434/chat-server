@@ -91,13 +91,31 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
 .panel-close { position:absolute; top:8px; right:12px; font-size:20px; color:#bbb; cursor:pointer; }
 
 /* 群信息 modal */
-.member { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid #f2f2f2; font-size:14px; }
-.member .owner-tag { color:#07c160; font-size:11px; margin-left:auto; }
-.member.me { color:#333; font-weight:600; }
+.member { display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid #f2f2f2; font-size:14px; cursor:pointer; }
+.member:last-child { border-bottom:none; }
+.member .mav { width:34px; height:34px; border-radius:6px; background:#e8f8ef; color:#07c160; display:flex; align-items:center; justify-content:center; font-size:15px; flex-shrink:0; font-weight:600; }
+.member .owner-tag { color:#07c160; font-size:11px; margin-left:auto; background:#e8f8ef; padding:2px 6px; border-radius:4px; }
+.member .mmeta { min-width:0; flex:1; }
+.member .mname { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.member .msub { font-size:11px; color:#999; }
+.member.me .mname { color:#333; font-weight:600; }
 .grp-ops { margin-top:14px; display:flex; flex-direction:column; gap:8px; }
-.op-row input { width:100%; padding:8px; border:1px solid #ddd; border-radius:6px; font-size:14px; }
-.btn-op { width:100%; padding:9px; border:none; border-radius:6px; font-size:14px; background:#07c160; color:#fff; cursor:pointer; }
+.btn-op { width:100%; padding:10px; border:none; border-radius:8px; font-size:14px; background:#07c160; color:#fff; cursor:pointer; }
 .btn-op.danger { background:#f5f5f5; color:#e64340; }
+/* 微信式选人弹层 */
+#pickModal { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; }
+#pickModal.hidden { display:none; }
+/* 建群按钮 (微信同款: 圆角胶囊, 发车绿色) */
+.newgrp-btn { display:inline-flex; align-items:center; gap:3px; font-size:13px; font-weight:600; color:#fff; background:linear-gradient(135deg,#07c160,#06ad56); padding:7px 12px; border-radius:16px; box-shadow:0 1px 3px rgba(7,193,96,.3); cursor:pointer; white-space:nowrap; transition:transform .12s ease, box-shadow .12s ease; }
+.newgrp-btn:active { transform:scale(.96); box-shadow:0 0 2px rgba(7,193,96,.3); }
+.member-pick { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #f6f6f6; cursor:pointer; }
+.member-pick:last-child { border-bottom:none; }
+.member-pick:active { background:#f7f7f7; }
+.member-pick .pav { width:38px; height:38px; border-radius:7px; background:#e8f8ef; color:#07c160; display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:600; flex-shrink:0; }
+.member-pick .pinfo { flex:1; min-width:0; }
+.member-pick .pname { font-size:14px; color:#222; }
+.member-pick .psub { font-size:11px; color:#999; margin-top:2px; }
+.member-pick.disabled { opacity:.45; pointer-events:none; }
 
 /* 设备 modal */
 .dev-item { display:flex; align-items:center; justify-content:space-between; padding:10px 0; border-bottom:1px solid #f2f2f2; }
@@ -105,6 +123,10 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
 .dev-item .sub { font-size:11px; color:#999; margin-top:2px; }
 .dev-item .kick { font-size:12px; color:#e64340; cursor:pointer; background:0; border:0; padding:6px 10px; }
 .dev-item .this { font-size:11px; color:#07c160; margin-left:6px; }
+.hist-item { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f6f6f6; font-size:12px; }
+.hist-item:last-child { border-bottom:none; }
+.hist-item .hip { color:#333; font-weight:600; }
+.hist-item .hts { color:#999; }
 
 /* 我的资料 modal */
 .prof-preview { display:flex; justify-content:center; margin:6px 0 12px; }
@@ -152,7 +174,7 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
       </div>
       <span id="meActions">
         <span id="devicesBtn" class="mini-btn">设备</span>
-        <span id="newGrp" class="mini-btn">+ 建群</span>
+        <span id="newGrp" class="mini-btn newgrp-btn">+ 建群</span>
         <span id="logout">退出</span>
       </span>
     </div>
@@ -187,14 +209,17 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
     <span class="panel-close" id="gClose">&times;</span>
     <h3 id="gTitle">群信息</h3>
     <div id="gMembers"></div>
-    <div class="grp-ops">
-      <div class="op-row"><input id="gAddUser" placeholder="用户名"></div>
-      <button class="btn-op" id="gAdd">加人</button>
-      <button class="btn-op" id="gTransfer">转让群主</button>
-      <button class="btn-op danger" id="gKick">踢人</button>
-      <button class="btn-op danger" id="gLeave">退群</button>
-      <button class="btn-op danger" id="gDissolve">解散群</button>
-    </div>
+    <div class="grp-ops" id="gOps"></div>
+  </div>
+</div>
+
+<!-- 微信式选人弹层 (邀请新成员 / 转让 / 踢人 均从这里点选) -->
+<div id="pickModal" class="hidden">
+  <div class="mask" id="pickMask"></div>
+  <div class="panel">
+    <span class="panel-close" id="pickClose">&times;</span>
+    <h3 id="pickTitle">选择成员</h3>
+    <div id="pickList" style="max-height:46vh;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -205,6 +230,8 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
     <span class="panel-close" id="devClose">&times;</span>
     <h3>我的设备 <span style="font-size:12px;color:#999;font-weight:400">(在线设备)</span></h3>
     <div id="devList"><div class="empty">加载中...</div></div>
+    <h3 style="margin-top:16px;font-size:14px">登录历史 <span style="font-size:12px;color:#999;font-weight:400">(最近 20 次, 含 IP)</span></h3>
+    <div id="loginHist"><div class="empty">加载中...</div></div>
   </div>
 </div>
 
@@ -219,37 +246,32 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
     </div>
     <button class="btn-op" id="myAvBtn" style="margin-bottom:12px">更换头像 (jpg/png/gif)</button>
     <input type="file" id="myAvFile" accept="image/*" class="hidden">
-    <div class="prof-field">
-      <label>昵称</label>
-      <input id="myName" placeholder="留空则用用户名" maxlength="20">
+    <div class="prof-field" style="border-top:1px solid #f0f0f0;padding-top:12px">
+      <label>昵称 / 个性签名 / 头像 修改后点下方「保存」</label>
+      <input id="myName" placeholder="昵称 (留空则用用户名)" maxlength="20">
+      <textarea id="mySig" maxlength="60" placeholder="个性签名" style="margin-top:8px"></textarea>
     </div>
-    <div class="prof-field">
-      <label>个性签名</label>
-      <textarea id="mySig" maxlength="60"></textarea>
+    <div class="prof-actions" style="margin:2px 0 14px">
+      <button class="btn-primary" id="mySaveBtn" style="flex:none;width:100%">保存资料</button>
     </div>
     <div class="prof-field" style="border-top:1px solid #f0f0f0;padding-top:12px">
-      <label>邮箱(找回密码用)</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="myEmail" placeholder="未绑定" style="flex:1" autocomplete="email">
-        <button class="btn-op" id="myEmailBtn" style="flex:none;white-space:nowrap">获取验证码</button>
-      </div>
+      <label>邮箱 (找回密码用) — 与资料保存相互独立</label>
+      <input id="myEmail" placeholder="未绑定" style="width:100%;box-sizing:border-box;min-height:44px" autocomplete="email">
+      <button class="btn-op" id="myEmailBtn" style="width:100%;margin-top:8px">获取验证码</button>
       <div id="myCodeRow" class="hidden" style="gap:8px;margin-top:8px">
-        <input id="myCode" placeholder="6位验证码" maxlength="6" style="flex:1">
-        <button class="btn-primary" id="myCodeBtn" style="flex:none">绑定</button>
+        <input id="myCode" placeholder="6位验证码" maxlength="6" style="width:100%;box-sizing:border-box;min-height:44px">
+        <button class="btn-primary" id="myCodeBtn" style="width:100%;margin-top:8px">绑定</button>
       </div>
       <div id="myEmailTip" style="color:#999;font-size:12px;min-height:16px;margin-top:4px"></div>
     </div>
     <div class="prof-field" style="border-top:1px solid #f0f0f0;padding-top:12px">
-      <label>修改密码</label>
+      <label>修改密码 — 独立保存, 不受「保存资料」影响</label>
       <input id="myOldPass" type="password" placeholder="当前密码" autocomplete="current-password">
       <input id="myNewPass" type="password" placeholder="新密码" style="margin-top:8px" autocomplete="new-password">
       <button class="btn-ghost" id="myPassBtn" style="width:100%;margin-top:8px">确认修改密码</button>
       <div id="myPassTip" style="color:#999;font-size:12px;min-height:16px;margin-top:4px"></div>
     </div>
     <div class="prof-field" id="myTip" style="color:#07c160;font-size:12px;min-height:16px"></div>
-    <div class="prof-actions">
-      <button class="btn-primary" id="mySaveBtn" style="flex:none;width:100%">保存</button>
-    </div>
   </div>
 </div>
 

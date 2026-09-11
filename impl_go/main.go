@@ -149,6 +149,26 @@ func (s *Store) AuditLogin(user, status, remote string) {
 	s.db.Exec("INSERT INTO audit_log(user, status, remote) VALUES(?,?,?)", user, status, remote)
 }
 
+// RecentLogins 某用户最近 N 条成功登录历史 (时间/IP), 供前端"登录设备与IP历史"展示
+func (s *Store) RecentLogins(user string, limit int) []map[string]interface{} {
+	rows, err := s.db.Query(
+		"SELECT ts, remote FROM audit_log WHERE user=? AND status='success' ORDER BY id DESC LIMIT ?", user, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var ts string
+		var remoteN sql.NullString
+		if err := rows.Scan(&ts, &remoteN); err != nil {
+			continue
+		}
+		out = append(out, map[string]interface{}{"ts": ts, "ip": remoteN.String})
+	}
+	return out
+}
+
 // AuditLogs 管理员导出审计日志
 func (s *Store) AuditLogs(limit int) []map[string]interface{} {
 	if limit <= 0 {
@@ -996,6 +1016,7 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		s.addConn(u, ws)
 		meta := s.registerDevice(ws, remote)
 		s.notifyNewDevice(u, ws, meta)
+		s.store.AuditLogin(u, "success", remote) // token 恢复也算一次成功登录 (设备/IP 历史)
 		// 重投未读 (同 login)
 		for _, m := range s.store.Undelivered(u) {
 			payload := map[string]interface{}{
@@ -1187,7 +1208,12 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 		if devs == nil {
 			devs = []map[string]interface{}{}
 		}
-		reply(map[string]interface{}{"type": "sessions", "devices": devs})
+		// 登录历史 (含 IP): 取最近 20 条成功登录记录 (含本端)
+		hist := s.store.RecentLogins(user, 20)
+		if hist == nil {
+			hist = []map[string]interface{}{}
+		}
+		reply(map[string]interface{}{"type": "sessions", "devices": devs, "history": hist})
 		return user
 	}
 
@@ -1256,8 +1282,9 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 	}
 
 	if act == "transfer_owner" {
-		// 群转让: 群主转让 owner 给成员
+		// 群转让: 群主转让 owner 给成员 (目标必须真实在群里)
 		gid, _ := msg["gid"].(string)
+		gid = strings.TrimPrefix(strings.TrimPrefix(gid, "group::"), "group:")
 		to, _ := msg["user"].(string)
 		if !s.store.GroupExists(gid) {
 			errReply("group_not_found")
@@ -1267,14 +1294,24 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			errReply("not_owner")
 			return user
 		}
+		if to == user {
+			errReply("already_owner")
+			return user
+		}
 		if !s.store.IsGroupMember(gid, to) {
 			errReply("not_member")
 			return user
 		}
 		if s.store.TransferOwner(gid, user, to) {
 			reply(map[string]interface{}{"type": "group_ok"})
+			// 新旧群主在线时刷新群面板 (群主标识变了)
+			for _, who := range []string{user, to} {
+				for _, c := range s.onlineConns(who) {
+					s.writeJSON(c, map[string]interface{}{"type": "conversations_refresh"})
+				}
+			}
 		} else {
-			reply(map[string]interface{}{"type": "error"})
+			errReply("transfer_failed")
 		}
 		return user
 	}
@@ -1327,8 +1364,9 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 	}
 
 	if act == "remove_member" {
-		// 群主踢人: 群主才能踢
+		// 群主踢人: 群主才能踢 (微信语义: 不能踢自己/群主; 目标必须是成员)
 		gid, _ := msg["gid"].(string)
+		gid = strings.TrimPrefix(strings.TrimPrefix(gid, "group::"), "group:")
 		u, _ := msg["user"].(string)
 		if !s.store.GroupExists(gid) {
 			errReply("group_not_found")
@@ -1338,10 +1376,22 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			errReply("not_owner")
 			return user
 		}
+		if u == user {
+			errReply("cannot_kick_self")
+			return user
+		}
+		if !s.store.IsGroupMember(gid, u) {
+			errReply("not_member")
+			return user
+		}
 		if s.store.RemoveMember(gid, u) {
 			reply(map[string]interface{}{"type": "group_ok"})
+			// 被踢者在线: 立即刷新其会话列表 (微信语义: 被移出群聊马上消失)
+			for _, c := range s.onlineConns(u) {
+				s.writeJSON(c, map[string]interface{}{"type": "conversations_refresh"})
+			}
 		} else {
-			reply(map[string]interface{}{"type": "error"})
+			errReply("kick_failed")
 		}
 		return user
 	}

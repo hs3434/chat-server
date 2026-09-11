@@ -40,7 +40,7 @@ function check(name, cond, extra = '') {
 
 (async () => {
   console.log('--- 1. 事件绑定完整性 (防 null 崩溃) ---');
-  const binds = ['newGrp','devicesBtn','devMask','grpInfo','modalMask','gAdd','gTransfer','gKick','gLeave','gDissolve','loginBtn','regBtn','logout','chatback','sendbtn'];
+  const binds = ['newGrp','devicesBtn','devMask','grpInfo','modalMask','pickClose','pickMask','loginBtn','regBtn','logout','chatback','sendbtn'];
   for (const id of binds) {
     const el = document.getElementById(id);
     check(`绑定 ${id}`, el && typeof el.onclick === 'function', `Got: ${el ? typeof el.onclick : 'null'}`);

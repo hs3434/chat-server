@@ -147,7 +147,7 @@ function handleServer(m) {
     case 'ack_read': resolveReq(m.seq, m); break;         // 已读回执确认 (服务端已置 read)
     case 'group_members': resolveReq(m.seq, m); break;    // 群成员列表 (群信息面板)
     case 'error': resolveReq(m.seq, m); break;
-    case 'conversations_refresh': // 服务器通知会话列表有变化 (如被拉进群)
+    case 'conversations_refresh': // 服务器通知会话列表有变化 (如被拉进群/被移出群)
       refreshConvs();
       break;
     case 'profile_evt': // 他人改了资料 (推给有会话的人)
@@ -462,68 +462,142 @@ async function refreshGrpInfo() {
   const r = await req({ type: 'group_members', gid: 'group::' + currentGid }, 'group_members');
   if (!r || r.type === 'error') return;
   currentGMembers = r.members || [];
+  State.grpOwner = r.owner;
   const isOwner = r.owner === State.user;
   $('gTitle').textContent = r.name || currentGid;
+  // 微信式成员列表: 头像位 + 昵称(用户名), 点击成员出操作 (踢人/转让 仅群主可见)
   $('gMembers').innerHTML = currentGMembers.map((u) => {
+    const pf = profileOf(u) || {};
+    const nm = pf.nickname || u;
     const tag = u === r.owner ? '<span class="owner-tag">群主</span>' : '';
+    const sub = pf.nickname ? esc(u) : '';
     const me = u === State.user ? ' me' : '';
-    return `<div class="member${me}"><span>${esc(u)}</span>${tag}</div>`;
+    return `<div class="member${me}" data-u="${esc(u)}">
+      <div class="mav">${esc(firstGlyph(nm))}</div>
+      <div class="mmeta"><div class="mname">${esc(nm)}${u===State.user?' (我)':''}</div>${sub?`<div class="msub">${sub}</div>`:''}</div>
+      ${tag}
+    </div>`;
   }).join('');
-  // 邀请入群: 所有成员都可拉人 (微信语义); 管理/转让/踢人/解散仅群主
-  $('gAdd').style.display = 'block';
-  $('gAddUser').style.display = 'block';
-  $('gTransfer').style.display = isOwner ? 'block' : 'none';
-  $('gKick').style.display = isOwner ? 'block' : 'none';
-  $('gLeave').style.display = 'block';
-  $('gDissolve').style.display = isOwner ? 'block' : 'none';
+  // 微信语义: 点成员 → 资料卡; 群主点其他成员 → 可选踢人/转让
+  $('gMembers').querySelectorAll('.member').forEach((el) => el.onclick = () => {
+    const u = el.dataset.u;
+    if (u === State.user) return;
+    if (isOwner) memberActions(u);
+    else showPeerCard(u);
+  });
+  // 操作区 (微信文案: 邀请新成员)
+  $('gOps').innerHTML = `
+    <button class="btn-op" id="gAdd">+ 邀请新成员</button>
+    ${isOwner ? '<button class="btn-op" id="gTransfer">转让群主</button><button class="btn-op danger" id="gKick">移出成员</button><button class="btn-op danger" id="gDissolve">解散群</button>' : ''}
+    <button class="btn-op danger" id="gLeave">退出群聊</button>`;
+  $('gAdd').onclick = pickInvite;
+  $('gLeave').onclick = grpLeave;
+  if (isOwner) { $('gTransfer').onclick = pickTransfer; $('gKick').onclick = pickKick; $('gDissolve').onclick = grpDissolve; }
 }
 
-// 新建群: 输群名 -> 建为会话
+// ---- 微信式选人弹层 ----
+function openPick(title, items) {
+  // items: [{u, sub, disabled, subCls}] -> 列表点选
+  $('pickTitle').textContent = title;
+  $('pickList').innerHTML = items.map((it) => `
+    <div class="member-pick${it.disabled ? ' disabled' : ''}" data-u="${esc(it.u)}">
+      <div class="pav">${esc(firstGlyph(it.sub || it.u))}</div>
+      <div class="pinfo"><div class="pname">${esc(it.u)}</div><div class="psub">${esc(it.sub || '')}</div></div>
+    </div>`).join('');
+  $('pickModal').classList.remove('hidden');
+  return $('pickList');
+}
+function closePick() { $('pickModal').classList.add('hidden'); }
+
+// 邀请新成员: 联系人(单聊对象+同群的人)里点选; 空池时回落手输 (首次单聊都还没发生)
+async function pickInvite() {
+  if (!currentGid) return;
+  const contacts = [...new Set(State.convs.filter((c) => !isGroup(c.chat)).map((c) => c.chat))];
+  const pool = [...new Set(contacts.concat(currentGMembers))];
+  if (!pool.length) {
+    const u = prompt('输入对方用户名邀请入群:');
+    if (!u || !u.trim()) return;
+    const r = await req({ type: 'add_member', gid: currentGid, user: u.trim() }, 'group_ok');
+    if (r && r.type === 'group_ok') { refreshGrpInfo(); }
+    else alert('邀请失败: ' + (r && r.code || '未知'));
+    return;
+  }
+  const items = pool.map((u) => ({
+    u,
+    sub: (profileOf(u) || {}).nickname || (currentGMembers.includes(u) ? '已在群里' : '联系人'),
+    disabled: currentGMembers.includes(u),
+  }));
+  const list = openPick('邀请新成员', items);
+  list.querySelectorAll('.member-pick').forEach((el) => el.onclick = async () => {
+    const u = el.dataset.u;
+    const r = await req({ type: 'add_member', gid: currentGid, user: u }, 'group_ok');
+    if (r && r.type === 'group_ok') { closePick(); refreshGrpInfo(); }
+    else alert('邀请失败: ' + (r && r.code || '未知'));
+  });
+}
+
+// 移出成员: 仅群主, 点选群里其他成员
+function pickKick() {
+  if (!currentGid) return;
+  const items = currentGMembers.filter((u) => u !== State.user).map((u) => ({
+    u, sub: (profileOf(u) || {}).nickname || '成员',
+  }));
+  const list = openPick('移出成员', items);
+  list.querySelectorAll('.member-pick').forEach((el) => el.onclick = async () => {
+    const u = el.dataset.u;
+    if (!confirm(`确认将 ${u} 移出群聊?`)) return;
+    const r = await req({ type: 'remove_member', gid: currentGid, user: u }, 'group_ok');
+    if (r && r.type === 'group_ok') { closePick(); refreshGrpInfo(); }
+    else alert('移出失败: ' + (r && r.code || '未知'));
+  });
+}
+
+// 转让群主: 仅群主, 点选其他成员
+function pickTransfer() {
+  if (!currentGid) return;
+  const items = currentGMembers.filter((u) => u !== State.user).map((u) => ({
+    u, sub: (profileOf(u) || {}).nickname || '成员',
+  }));
+  const list = openPick('转让群主给', items);
+  list.querySelectorAll('.member-pick').forEach((el) => el.onclick = async () => {
+    const u = el.dataset.u;
+    if (!confirm(`确认把群主转让给 ${u}?`)) return;
+    const r = await req({ type: 'transfer_owner', gid: currentGid, user: u }, 'group_ok');
+    if (r && r.type === 'group_ok') { closePick(); refreshGrpInfo(); }
+    else alert('转让失败: ' + (r && r.code || '未知'));
+  });
+}
+
+// 群主点击成员: 微信语义 → 资料卡 + 操作入口
+function memberActions(u) {
+  showPeerCard(u);
+}
+
+// 新建群: 输群名 -> 建为会话 (随后直接弹出微信式选人拉人)
 async function createGroup() {
   const name = prompt('群名称:');
   if (!name || !name.trim()) return;
   const gid = 'g' + Date.now().toString(36);
   const r = await req({ type: 'create_group', gid, name: name.trim() }, 'group_ok');
   if (r && r.type === 'group_ok') {
+    // 记录最近建的群 (E2E/调试用): 测试侧从 localStorage 读取真实 gid
+    try { localStorage.setItem('wxlike_last_gid', gid); } catch (e) {}
     // 本地先插入新群会话 (含 name), 避免 openChat 时 convs 还没刷新拿不到群名
     const key = 'group::' + gid;
     if (!State.convs.some((x) => x.chat === key)) {
       State.convs.unshift({ chat: key, name: name.trim(), last_body: '', last_ts: Date.now(), last_from: '', unread: 0 });
     }
     refreshConvs();
-    openChat(key);
+    await openChat(key);
+    // 建群即邀请: 打开群面板并弹微信式选人 (微信语义)
+    openGrpModal(gid);
+    pickInvite();
   } else {
     alert('建群失败: ' + (r && r.code || '未知'));
   }
 }
 
-// 群操作
-async function grpAdd() {
-  const u = $('gAddUser').value.trim();
-  if (!u || !currentGid) return;
-  const r = await req({ type: 'add_member', gid: currentGid, user: u }, 'group_ok');
-  if (r && r.type === 'group_ok') { $('gAddUser').value = ''; refreshGrpInfo(); }
-  else if (r && r.code === 'no_such_user') alert('用户不存在: ' + u);
-  else if (r && r.code === 'already_member') alert(u + ' 已经在群里了');
-  else if (r && r.code === 'not_member') alert('你不是群成员, 不能邀请');
-  else alert('加人失败: ' + (r && r.code || '未知'));
-}
-
-async function grpTransfer() {
-  const u = prompt('转让给成员:');
-  if (!u || !currentGid) return;
-  const r = await req({ type: 'transfer_owner', gid: currentGid, user: u }, 'group_ok');
-  if (r && r.type === 'group_ok') refreshGrpInfo();
-  else alert('转让失败: ' + (r && r.code || '未知'));
-}
-
-async function grpKick() {
-  const u = prompt('踢出成员:');
-  if (!u || !currentGid) return;
-  const r = await req({ type: 'remove_member', gid: currentGid, user: u }, 'group_ok');
-  if (r && r.type === 'group_ok') refreshGrpInfo();
-  else alert('踢人失败: ' + (r && r.code || '未知'));
-}
+// 群操作 (旧 prompt 式 grpAdd/grpTransfer/grpKick 已由微信式选人弹层 pickInvite/pickKick/pickTransfer 取代)
 
 async function grpLeave() {
   if (!currentGid || !confirm('确认退出该群?')) return;
@@ -549,9 +623,9 @@ async function showDevices() {
   $('devModal').classList.remove('hidden');
   $('devList').innerHTML = '<div class="empty">加载中...</div>';
   const r = await req({ type: 'sessions' }, 'sessions');
-  if (!r || r.type === 'error') { $('devList').innerHTML = '<div class="empty">无法获取设备</div>'; return; }
+  if (!r || r.type === 'error') { $('devList').innerHTML = '<div class="empty">无法获取设备</div>'; $('loginHist').innerHTML = ''; return; }
   const devs = r.devices || [];
-  if (!devs.length) { $('devList').innerHTML = '<div class="empty">无在线设备</div>'; return; }
+  if (!devs.length) { $('devList').innerHTML = '<div class="empty">无在线设备</div>'; } else {
   // 当前设备 (唯一无 from 自我标记, 简化: 假定最后一台是本机, 因本 conn 刚注册 newest)
   $('devList').innerHTML = devs.map((d) => `
     <div class="dev-item">
@@ -562,6 +636,16 @@ async function showDevices() {
       <button class="kick" data-sid="${esc(d.sid)}">下线</button>
     </div>`).join('');
   $('devList').querySelectorAll('.kick').forEach((b) => b.onclick = () => kickDevice(b.dataset.sid));
+  }
+  // 登录历史 (最近 20 次, 含 IP)
+  const hist = r.history || [];
+  $('loginHist').innerHTML = hist.length
+    ? hist.map((h) => `
+      <div class="hist-item">
+        <span class="hip">${esc(h.ip || '未知 IP')}</span>
+        <span class="hts">${esc(fmtSqlDate(h.ts))}</span>
+      </div>`).join('')
+    : '<div class="empty">暂无记录</div>';
 }
 
 async function kickDevice(sid) {
@@ -576,6 +660,14 @@ function hideDevices() { $('devModal').classList.add('hidden'); }
 function fmtDate(ts) {
   if (!ts) return '';
   const d = new Date(ts);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// sqlite datetime('now') 是 "YYYY-MM-DD HH:MM:SS" (UTC), 转本地显示
+function fmtSqlDate(s) {
+  if (!s) return '';
+  const d = new Date(s.replace(' ', 'T') + 'Z');
+  if (isNaN(d)) return s;
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
@@ -739,11 +831,8 @@ $('devicesBtn').onclick = showDevices;
 $('devMask').onclick = hideDevices;
 $('grpInfo').onclick = () => { if (State.view && isGroup(State.view)) openGrpModal(State.view.slice(7)); };
 $('modalMask').onclick = hideModal;
-$('gAdd').onclick = grpAdd;
-$('gTransfer').onclick = grpTransfer;
-$('gKick').onclick = grpKick;
-$('gLeave').onclick = grpLeave;
-$('gDissolve').onclick = grpDissolve;
+$('pickClose').onclick = closePick;
+$('pickMask').onclick = closePick;
 $('loginBtn').onclick = () => doLogin(false);
 $('regBtn').onclick = () => doLogin(true);
 $('logout').onclick = logout;

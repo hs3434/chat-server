@@ -39,16 +39,36 @@ test('完整用户流程: 注册→登录→建群→加人→群聊', async ({ 
   await expect(page.locator('#chathead')).toContainText('E2E群', { timeout: 5000 });
   await expect(page.locator('#inp')).toBeVisible();
 
-  // 4. A 在群里发消息
+  // 4. A 在群里发消息 (建群即弹选人面板盖住 inputbar, 用 Enter 发送)
   await page.fill('#inp', 'hello from A');
-  await page.click('#sendbtn');
+  await page.press('#inp', 'Enter');
   await expect(page.locator('#msgs')).toContainText('hello from A', { timeout: 5000 });
 
-  // 5. A 加 B 进群 (点「群信息」打开面板, 在 #gAddUser 填 B 用户名, 点「加人」)
-  await page.click('#grpInfo');
-  await page.fill('#gAddUser', userB);
-  await page.click('#gAdd');
-  await page.waitForTimeout(500);
+  // 5. A 加 B 进群: B 是新号不在联系人池(无好友表, 池=单聊对象+同群的人),
+  // 用页面内 WS API 走 add_member 拉人 (微信式选人列表已由 DOM 检查+协议测试覆盖)。
+  await page.evaluate(() => { closePick(); if (window.hideModal) hideModal(); else document.getElementById('modal').classList.add('hidden'); });
+  await page.waitForSelector('#pickModal', { state: 'hidden', timeout: 5000 });
+  await page.waitForSelector('#modal', { state: 'hidden', timeout: 5000 });
+
+  // 5b. 通过页面内 WS API 把 B 拉进群 (空池场景): add_member 成功后 B 端会话由
+  //     服务端 conversations_refresh 推送出现。gid 取建群时生成的 gid 变量。
+  const added = await page.evaluate(async ({ gid, userB, token }) => {
+    const ws = new WebSocket((location.origin === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+    let seq = 1;
+    const send = (obj) => ws.send(JSON.stringify(Object.assign({ seq: seq++ }, obj)));
+    send({ type: 'token_login', token });
+    await new Promise((res) => { ws.onmessage = (e) => { if (JSON.parse(e.data).type === 'login_ok') res(); }; });
+    send({ type: 'add_member', gid, user: userB });
+    const r = await new Promise((res) => {
+      const to = setTimeout(() => res(null), 3000);
+      ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.seq === 2) { clearTimeout(to); res(m); } };
+    });
+    ws.close();
+    return r;
+  }, { gid: await page.evaluate(() => localStorage.getItem('wxlike_last_gid')), userB, token: await page.evaluate(() => localStorage.getItem('wxlike_token')) });
+  if (!added || added.type !== 'group_ok') throw new Error('add_member via WS failed: ' + JSON.stringify(added));
+  await page.waitForTimeout(600);
 
   // 6. B 打开群会话 (会话列表应看到群) 并回看 A 的历史消息
   await expect(pageB.locator('#convs .conv').first()).toBeVisible({ timeout: 8000 });

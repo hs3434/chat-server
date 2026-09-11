@@ -55,10 +55,13 @@ while ((m = reDollar.exec(js))) refs.add(m[2]);
 const reGet = /getElementById\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
 while ((m = reGet.exec(js))) refs.add(m[2]);
 
-// 动态创建的 id (代码里 .id = 'x')
+// 动态创建的 id (代码里 .id = 'x' 或 innerHTML 模板里 id="x")
 const dynamic = new Set();
 const reDyn = /\.id\s*=\s*(['"])([^'"]+)\1/g;
 while ((m = reDyn.exec(js))) dynamic.add(m[2]);
+// innerHTML/模板字符串里的静态 id (JS 动态生成的 DOM, 如群面板按钮)
+const reTmpl = /\bid\s*=\s*(['"])([A-Za-z][\w-]*)\1/g;
+while ((m = reTmpl.exec(js))) dynamic.add(m[2]);
 
 let fail = false;
 const missing = [...refs].filter(id => !htmlIds.has(id) && !dynamic.has(id));
