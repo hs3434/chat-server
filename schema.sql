@@ -61,3 +61,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
   remote TEXT                    -- 来源 IP (可空)
 );
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user, ts);
+
+-- ===== 联系人 (好友) =====
+-- 双向各存一行 (A加B => A->B 与 B->A 两行), 查询/会话并集都简单
+CREATE TABLE IF NOT EXISTS contacts (
+  user TEXT NOT NULL,
+  friend TEXT NOT NULL,
+  created_at INTEGER DEFAULT (unixepoch()),
+  PRIMARY KEY (user, friend)
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_friend ON contacts(friend);

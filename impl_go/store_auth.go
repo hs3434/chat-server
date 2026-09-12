@@ -50,6 +50,84 @@ func (s *Store) EmailTaken(email string) bool {
 	return n > 0
 }
 
+// ---- 联系人 (好友) ----
+
+// AddContact 双向添加联系人 (已是好友则幂等成功)
+func (s *Store) AddContact(a, b string) error {
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO contacts(user, friend) VALUES(?,?), (?,?)`, a, b, b, a); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DelContact 双向删除联系人
+func (s *Store) DelContact(a, b string) error {
+	_, err := s.db.Exec(`DELETE FROM contacts WHERE (user=? AND friend=?) OR (user=? AND friend=?)`, a, b, b, a)
+	return err
+}
+
+// IsContact a 的联系人里是否有 b
+func (s *Store) IsContact(a, b string) bool {
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM contacts WHERE user=? AND friend=?`, a, b).Scan(&n)
+	return n > 0
+}
+
+// Contacts 该用户全部联系人 (按添加时间倒序)
+func (s *Store) Contacts(user string) []string {
+	rows, err := s.db.Query(`SELECT friend FROM contacts WHERE user=? ORDER BY created_at DESC`, user)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var u string
+		if rows.Scan(&u) == nil && u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// SearchUsersFull 搜索用户, 带昵称/头像/是否已是联系人
+// 注意: 必须先把结果行全部收完再调 IsContact —— 遍历 rows 时嵌套查询会在单连接池上自锁(无回包)
+func (s *Store) SearchUsersFull(q string, exclude string) []map[string]interface{} {
+	like := "%" + q + "%"
+	rows, err := s.db.Query(`
+		SELECT a.username, COALESCE(a.nickname,''), COALESCE(a.avatar,'')
+		FROM accounts a
+		WHERE a.username != ? AND (a.username LIKE ? OR a.nickname LIKE ?)
+		ORDER BY a.username LIMIT 20`, exclude, like, like)
+	if err != nil {
+		return nil
+	}
+	type su struct {
+		u, n, av string
+	}
+	var found []su
+	for rows.Next() {
+		var u, n, av string
+		if rows.Scan(&u, &n, &av) == nil {
+			found = append(found, su{u, n, av})
+		}
+	}
+	rows.Close()
+	// 已是联系人的集合 (一次查完, 不嵌套)
+	friendSet := map[string]bool{}
+	for _, f := range s.Contacts(exclude) {
+		friendSet[f] = true
+	}
+	var out []map[string]interface{}
+	for _, it := range found {
+		out = append(out, map[string]interface{}{
+			"username": it.u, "nickname": it.n, "avatar": it.av,
+			"is_contact": friendSet[it.u],
+		})
+	}
+	return out
+}
+
 // ---- 验证码 ----
 
 // validEmail 基础邮箱格式校验 (a@b.c, 无空格)

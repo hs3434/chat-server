@@ -173,6 +173,7 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
         </div>
       </div>
       <span id="meActions">
+        <span id="addFriend" class="mini-btn">+ 好友</span>
         <span id="devicesBtn" class="mini-btn">设备</span>
         <span id="newGrp" class="mini-btn newgrp-btn">+ 建群</span>
         <span id="logout">退出</span>
@@ -220,6 +221,24 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
     <span class="panel-close" id="pickClose">&times;</span>
     <h3 id="pickTitle">选择成员</h3>
     <div id="pickList" style="max-height:46vh;overflow-y:auto"></div>
+  </div>
+</div>
+
+<!-- 好友弹层 (通讯录: 搜索加好友 + 好友列表点开聊天) -->
+<div id="friendModal" class="hidden">
+  <div class="mask" id="friendMask"></div>
+  <div class="panel">
+    <span class="panel-close" id="friendClose">&times;</span>
+    <h3>好友</h3>
+    <div style="margin:6px 0 2px;display:flex;gap:8px">
+      <input id="friendSearch" placeholder="搜索用户名/昵称, 点结果添加" style="flex:1;min-height:38px;box-sizing:border-box;padding:0 10px;border:1px solid #e5e5e5;border-radius:8px;font-size:14px" autocomplete="off">
+      <button class="btn-primary" id="friendSearchBtn" style="padding:0 16px;min-height:38px;font-size:13px">搜索</button>
+    </div>
+    <div id="friendSearchTip" style="color:#999;font-size:12px;min-height:16px;margin:2px 0 4px"></div>
+    <div id="friendResult" style="max-height:26vh;overflow-y:auto"></div>
+    <div style="border-top:1px solid #f2f2f2;margin:8px 0 4px"></div>
+    <div style="font-size:12px;color:#999;margin:2px 0">我的好友 (点击发消息)</div>
+    <div id="friendList" style="max-height:30vh;overflow-y:auto"></div>
   </div>
 </div>
 

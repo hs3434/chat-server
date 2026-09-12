@@ -385,6 +385,11 @@ async function tokenLogin() {
     }
     State.user = r.user;
     State.token = r.token;
+    State.nick = r.nickname || '';
+    State.avatar = r.avatar || '';
+    State.sig = r.signature || '';
+    State.email = r.email || '';
+    if (State.user) cacheProfile(State.user, { nickname: State.nick, signature: State.sig, avatar: State.avatar });
     completeLogin();
   } finally { State._tokLog = false; }
 }
@@ -509,11 +514,13 @@ function openPick(title, items) {
 }
 function closePick() { $('pickModal').classList.add('hidden'); }
 
-// 邀请新成员: 联系人(单聊对象+同群的人)里点选; 空池时回落手输 (首次单聊都还没发生)
+// 邀请新成员: 好友优先, 回落联系人(单聊对象+同群的人); 空池时回落手输 (首次单聊都还没发生)
 async function pickInvite() {
   if (!currentGid) return;
+  // 选人池: 好友优先 (微信语义), 回落单聊对象 + 同群的人
+  const friends = await contactsList();
   const contacts = [...new Set(State.convs.filter((c) => !isGroup(c.chat)).map((c) => c.chat))];
-  const pool = [...new Set(contacts.concat(currentGMembers))];
+  const pool = [...new Set(friends.concat(contacts).concat(currentGMembers))];
   if (!pool.length) {
     const u = prompt('输入对方用户名邀请入群:');
     if (!u || !u.trim()) return;
@@ -825,8 +832,83 @@ async function showPeerCard(user) {
 }
 function closePeerCard() { $('peerModal').classList.add('hidden'); }
 
+// ---------- 好友 (通讯录) ----------
+// pickInvite 选人池: 好友优先 (微信语义), 无好友回落单聊对象+同群的人, 再空则手输
+async function contactsList() {
+  const r = await req({ type: 'contacts' }, 'contacts', 5000);
+  return (r && r.type === 'contacts' && r.friends) ? r.friends : [];
+}
+
+async function openFriends() {
+  $('friendSearch').value = '';
+  $('friendSearchTip').textContent = '';
+  $('friendResult').innerHTML = '';
+  $('friendModal').classList.remove('hidden');
+  renderFriendList(await contactsList());
+}
+
+function closeFriends() { $('friendModal').classList.add('hidden'); }
+
+function renderFriendList(friends) {
+  const box = $('friendList');
+  if (!friends || !friends.length) {
+    box.innerHTML = '<div class="empty">还没有好友, 上面搜索添加</div>';
+    return;
+  }
+  box.innerHTML = friends.map((u) => {
+    const pf = profileOf(u) || {};
+    const nm = pf.nickname || u;
+    return `<div class="member-pick" data-u="${esc(u)}">
+      <div class="pav">${esc(firstGlyph(nm))}</div>
+      <div class="pinfo"><div class="pname">${esc(nm)}</div>${pf.nickname ? `<div class="psub">${esc(u)}</div>` : ''}</div>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.member-pick').forEach((el) => el.onclick = async () => {
+    closeFriends();
+    await openChat(el.dataset.u);
+  });
+  // 顺手预热昵称头像
+  warmUsers(friends);
+}
+
+async function friendSearchGo() {
+  const q = $('friendSearch').value.trim();
+  const tip = $('friendSearchTip');
+  const box = $('friendResult');
+  if (!q) { tip.textContent = '输入用户名或昵称搜索'; return; }
+  tip.textContent = '搜索中...';
+  const r = await req({ type: 'search_users', q }, 'search_users', 5000);
+  const users = (r && r.type === 'search_users' && r.users) ? r.users : [];
+  tip.textContent = users.length ? `找到 ${users.length} 人` : '没有找到, 换个关键词试试';
+  box.innerHTML = users.map((u) => {
+    const nm = u.nickname || u.username;
+    const added = u.is_contact;
+    return `<div class="member-pick${added ? ' disabled' : ''}" data-u="${esc(u.username)}">
+      <div class="pav">${esc(firstGlyph(nm))}</div>
+      <div class="pinfo"><div class="pname">${esc(nm)}</div><div class="psub">${esc(u.username)}</div></div>
+      <span class="mini-btn" style="${added ? 'background:#f4f4f4;color:#999' : ''}">${added ? '已添加' : '+ 添加'}</span>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.member-pick').forEach((el) => el.onclick = async () => {
+    const u = el.dataset.u;
+    const rr = await req({ type: 'add_contact', friend: u }, 'contact_ok', 5000);
+    if (rr && rr.type === 'contact_ok') {
+      tip.textContent = `已添加 ${u} 为好友`;
+      friendSearchGo(); // 刷新结果态 (变"已添加")
+      renderFriendList(await contactsList());
+    } else {
+      tip.textContent = '添加失败: ' + ((rr && rr.code) || '未知错误');
+    }
+  });
+}
+
 // ---------- 事件绑定 ----------
 $('newGrp').onclick = createGroup;
+$('addFriend').onclick = openFriends;
+$('friendClose').onclick = closeFriends;
+$('friendMask').onclick = closeFriends;
+$('friendSearchBtn').onclick = friendSearchGo;
+$('friendSearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') friendSearchGo(); });
 $('devicesBtn').onclick = showDevices;
 $('devMask').onclick = hideDevices;
 $('grpInfo').onclick = () => { if (State.view && isGroup(State.view)) openGrpModal(State.view.slice(7)); };

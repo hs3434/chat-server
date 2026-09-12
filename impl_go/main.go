@@ -130,6 +130,20 @@ func NewStore(dbPath, schemaPath string) (*Store, error) {
 	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email) WHERE email <> ''"); err != nil {
 		return nil, err
 	}
+
+	// 联系人(好友)表: 双向各存一行 (A加B => A->B 与 B->A 两行)
+	// 放在 Go 侧 CREATE 而非只靠 schema.sql: 老库已存在时 CREATE TABLE IF NOT EXISTS 同样幂等生效
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS contacts(
+		user TEXT NOT NULL,
+		friend TEXT NOT NULL,
+		created_at INTEGER DEFAULT (unixepoch()),
+		PRIMARY KEY (user, friend)
+	)`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_contacts_friend ON contacts(friend)`); err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -1520,6 +1534,81 @@ func (s *Server) route(user string, ws *websocket.Conn, msg map[string]interface
 			rows = []ConversationRow{}
 		}
 		reply(map[string]interface{}{"type": "conversations", "items": rows})
+		return user
+	}
+
+	// search_users: 按用户名/昵称模糊搜人 (加好友用)
+	if act == "search_users" {
+		if user == "" {
+			errReply("unauthorized")
+			return user
+		}
+		q, _ := msg["q"].(string)
+		q = strings.TrimSpace(q)
+		if q == "" {
+			reply(map[string]interface{}{"type": "search_users", "users": []map[string]interface{}{}})
+			return user
+		}
+		users := s.store.SearchUsersFull(q, user)
+		if users == nil {
+			users = []map[string]interface{}{}
+		}
+		reply(map[string]interface{}{"type": "search_users", "users": users})
+		return user
+	}
+
+	// contacts: 我的好友列表
+	if act == "contacts" {
+		if user == "" {
+			errReply("unauthorized")
+			return user
+		}
+		friends := s.store.Contacts(user)
+		if friends == nil {
+			friends = []string{}
+		}
+		reply(map[string]interface{}{"type": "contacts", "friends": friends})
+		return user
+	}
+
+	// add_contact: 加好友 (双向; 目标必须存在; 加自己拒绝)
+	if act == "add_contact" {
+		if user == "" {
+			errReply("unauthorized")
+			return user
+		}
+		f, _ := msg["friend"].(string)
+		f = strings.TrimSpace(f)
+		if f == "" || f == user {
+			errReply("bad_param")
+			return user
+		}
+		if !s.store.UserExists(f) {
+			errReply("no_such_user")
+			return user
+		}
+		if err := s.store.AddContact(user, f); err != nil {
+			errReply("server_error")
+			return user
+		}
+		reply(map[string]interface{}{"type": "contact_ok", "friend": f})
+		return user
+	}
+
+	// del_contact: 删除好友 (双向)
+	if act == "del_contact" {
+		if user == "" {
+			errReply("unauthorized")
+			return user
+		}
+		f, _ := msg["friend"].(string)
+		f = strings.TrimSpace(f)
+		if f == "" {
+			errReply("bad_param")
+			return user
+		}
+		s.store.DelContact(user, f)
+		reply(map[string]interface{}{"type": "contact_ok", "friend": f, "deleted": true})
 		return user
 	}
 
