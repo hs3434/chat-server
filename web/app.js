@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const State = {
   user: null,
   token: null,
+  contacts: [],          // 好友列表 (通讯录 Tab)
   nick: null,            // 自己的昵称 (空=回落 user)
   avatar: null,          // 自己的头像 /uploads/file (空=首字母占位)
   sig: null,             // 自己签名
@@ -146,6 +147,9 @@ function handleServer(m) {
     case 'reset_ok': resolveReq(m.seq, m); break;         // 密码重置成功
     case 'ack_read': resolveReq(m.seq, m); break;         // 已读回执确认 (服务端已置 read)
     case 'group_members': resolveReq(m.seq, m); break;    // 群成员列表 (群信息面板)
+    case 'contacts': resolveReq(m.seq, m); break;         // 好友列表 (通讯录)
+    case 'search_users': resolveReq(m.seq, m); break;     // 搜人 (加好友)
+    case 'contact_ok': resolveReq(m.seq, m); break;       // 加/删好友成功
     case 'error': resolveReq(m.seq, m); break;
     case 'conversations_refresh': // 服务器通知会话列表有变化 (如被拉进群/被移出群)
       refreshConvs();
@@ -434,7 +438,8 @@ function completeLogin() {
 function logout() {
   try { localStorage.removeItem('wxlike_token'); localStorage.removeItem('wxlike_user'); } catch (e) {}
   if (State.ws) State.ws.close();
-  State.user = null; State.token = null; State.convs = []; State.online = {}; State.view = null;
+  State.user = null; State.token = null; State.convs = []; State.contacts = []; State.online = {}; State.view = null;
+  contactsLoaded = false;
   State.msgs = {}; State.seen = new Set();
   $('app').classList.add('hidden');
   $('auth').classList.remove('hidden');
@@ -747,7 +752,7 @@ function warmUsers(list) {
   (list || []).forEach((u) => {
     if (!u || u === State.user) return;
     if (State.profiles[u] || State.profileQ[u]) return;
-    hitProfile(u).then(() => { if (State.view && !isGroup(State.view) && State.view === u) { updateChatHead(); renderMsgs(); } else { renderConvs(); } });
+    hitProfile(u).then(() => { if (State.view && !isGroup(State.view) && State.view === u) { updateChatHead(); renderMsgs(); } else if (!$('contactsTab').classList.contains('hidden') && !contactsLoaded) { return; } else if (!$('contactsTab').classList.contains('hidden')) { renderContactsTab(); } else { renderConvs(); } });
   });
 }
 
@@ -849,6 +854,68 @@ async function openFriends() {
 
 function closeFriends() { $('friendModal').classList.add('hidden'); }
 
+// ---------- 通讯录 Tab (微信式) ----------
+let contactsLoaded = false;
+
+async function showTab(tab) {
+  // 切换底部 Tab: msgs=会话列表, contacts=通讯录
+  const isContacts = tab === 'contacts';
+  $('tabMsgs').classList.toggle('active', !isContacts);
+  $('tabContacts').classList.toggle('active', isContacts);
+  $('convs').classList.toggle('hidden', isContacts);
+  $('contactsTab').classList.toggle('hidden', !isContacts);
+  if (isContacts && !contactsLoaded) await refreshContactsTab();
+  if (isContacts) warmUsers(State.contacts || []);
+}
+
+async function refreshContactsTab() {
+  const r = await req({ type: 'contacts' }, 'contacts', 5000);
+  State.contacts = (r && r.type === 'contacts' && r.friends) ? r.friends : [];
+  contactsLoaded = true;
+  renderContactsTab();
+}
+
+function renderContactsTab() {
+  const box = $('contactsTab');
+  const friends = [...(State.contacts || [])].sort((a, b) => a.localeCompare(b));
+  // 微信通讯录: 顶部固定入口行 (新的朋友=搜索加好友)
+  let html = `<div class="ct-entry" id="ctNewFriends">
+      <div class="ct-eav">👤+</div>
+      <div class="ct-main"><div class="ct-name" style="font-weight:600">新的朋友</div><div class="ct-sub">搜索用户名/昵称添加</div></div>
+    </div>`;
+  if (!friends.length) {
+    html += `<div class="empty">还没有好友, 点上方"新的朋友"添加</div>`;
+    box.innerHTML = html;
+    bindContactsTab(box);
+    return;
+  }
+  // 头字母分组 (微信通讯录样式)
+  let lastLetter = '';
+  for (const u of friends) {
+    const pf = profileOf(u) || {};
+    const nm = pf.nickname || u;
+    const letter = firstGlyph(nm).toUpperCase();
+    if (letter !== lastLetter) { html += `<div class="ct-group">${esc(letter)}</div>`; lastLetter = letter; }
+    const avImg = pf && avatarUrl(pf.avatar);
+    const av = avImg
+      ? `<img src="${esc(avImg)}" alt="" onerror="this.remove()">`
+      : `<span class="av-letter">${esc(firstGlyph(nm))}</span>`;
+    html += `<div class="ct-row" data-u="${esc(u)}">
+      <div class="av">${av}</div>
+      <div class="ct-main"><div class="ct-name">${esc(nm)}</div>${pf.nickname ? `<div class="ct-sub">微信号: ${esc(u)}</div>` : ''}</div>
+    </div>`;
+  }
+  box.innerHTML = html;
+  bindContactsTab(box);
+  warmUsers(friends); // 预热资料: 拿到昵称/头像后重绘
+}
+
+function bindContactsTab(box) {
+  const nf = box.querySelector('#ctNewFriends');
+  if (nf) nf.onclick = openFriends; // 复用好友弹层 (搜索+添加)
+  box.querySelectorAll('.ct-row').forEach((el) => el.onclick = () => openChat(el.dataset.u));
+}
+
 function renderFriendList(friends) {
   const box = $('friendList');
   if (!friends || !friends.length) {
@@ -905,6 +972,8 @@ async function friendSearchGo() {
 // ---------- 事件绑定 ----------
 $('newGrp').onclick = createGroup;
 $('addFriend').onclick = openFriends;
+$('tabMsgs').onclick = () => showTab('msgs');
+$('tabContacts').onclick = () => showTab('contacts');
 $('friendClose').onclick = closeFriends;
 $('friendMask').onclick = closeFriends;
 $('friendSearchBtn').onclick = friendSearchGo;

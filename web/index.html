@@ -47,6 +47,28 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
 #meActions { display:flex; gap:6px; flex-shrink:0; align-items:center; }
 #logout { font-size:13px; color:#888; padding:6px 10px; background:#f2f2f2; border-radius:6px; }
 #convs { flex:1; overflow-y:auto; }
+
+/* ---- 微信式底部 Tab 栏 (消息/通讯录) ---- */
+#tabbar { display:flex; border-top:1px solid #e5e5e5; background:#f7f7f7; flex-shrink:0; }
+#tabbar .tab { flex:1; display:flex; flex-direction:column; align-items:center; gap:1px; padding:6px 0 5px; font-size:11px; color:#999; cursor:pointer; user-select:none; }
+#tabbar .tab .tab-ico { font-size:22px; line-height:1; filter:grayscale(1); opacity:.55; }
+#tabbar .tab.active { color:#07c160; }
+#tabbar .tab.active .tab-ico { filter:none; opacity:1; }
+#tabbar .tab:active { background:#ececec; }
+
+/* ---- 通讯录列表 (复用会话行样式 + 头字母分组) ---- */
+#contactsTab { flex:1; overflow-y:auto; }
+#contactsTab .ct-group { padding:4px 16px; background:#ededed; color:#888; font-size:12px; }
+#contactsTab .ct-row { display:flex; padding:11px 16px; border-bottom:1px solid #f5f5f5; cursor:pointer; align-items:center; background:#fff; }
+#contactsTab .ct-row:active { background:#f7f7f7; }
+#contactsTab .ct-row .av { width:40px; height:40px; border-radius:8px; background:#07c160; color:#fff; display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:600; margin-right:12px; flex-shrink:0; overflow:hidden; }
+#contactsTab .ct-row .av img { width:100%; height:100%; object-fit:cover; display:block; }
+#contactsTab .ct-row .ct-main { flex:1; min-width:0; }
+#contactsTab .ct-row .ct-name { font-size:16px; color:#222; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#contactsTab .ct-row .ct-sub { font-size:12px; color:#999; margin-top:2px; }
+#contactsTab .ct-entry { display:flex; padding:11px 16px; border-bottom:1px solid #f5f5f5; cursor:pointer; align-items:center; background:#fff; }
+#contactsTab .ct-entry:active { background:#f7f7f7; }
+#contactsTab .ct-entry .ct-eav { width:40px; height:40px; border-radius:8px; background:#07c160; color:#fff; display:flex; align-items:center; justify-content:center; font-size:18px; margin-right:12px; flex-shrink:0; }
 .conv { display:flex; padding:12px 16px; border-bottom:1px solid #f5f5f5; cursor:pointer; align-items:center; }
 .conv:active { background:#f7f7f7; }
 .conv .av { width:44px; height:44px; border-radius:8px; background:#07c160; color:#fff; display:flex; align-items:center; justify-content:center; font-size:18px; font-weight:600; margin-right:12px; flex-shrink:0; overflow:hidden; }
@@ -180,6 +202,20 @@ button { padding:12px 20px; border:none; border-radius:8px; font-size:16px; curs
       </span>
     </div>
     <div id="convs"></div>
+
+    <!-- 通讯录 (微信式: 好友列表 Tab) -->
+    <div id="contactsTab" class="hidden"></div>
+
+    <!-- 底部 Tab 栏 (微信式: 消息/通讯录) -->
+    <div id="tabbar">
+      <span class="tab active" id="tabMsgs">
+        <span class="tab-ico">💬</span><span>消息</span>
+      </span>
+      <span class="tab" id="tabContacts">
+        <span class="tab-ico">👥</span><span>通讯录</span>
+      </span>
+    </div>
+
   </div>
   <div id="chatbox">
     <div id="chathead" class="hidden">
