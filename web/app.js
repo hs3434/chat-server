@@ -963,6 +963,9 @@ async function friendSearchGo() {
       tip.textContent = `已添加 ${u} 为好友`;
       friendSearchGo(); // 刷新结果态 (变"已添加")
       renderFriendList(await contactsList());
+      // 同步通讯录 Tab (若已加载过, 加完好友立即反映)
+      contactsLoaded = false;
+      if (!$('contactsTab').classList.contains('hidden')) await refreshContactsTab();
     } else {
       tip.textContent = '添加失败: ' + ((rr && rr.code) || '未知错误');
     }
